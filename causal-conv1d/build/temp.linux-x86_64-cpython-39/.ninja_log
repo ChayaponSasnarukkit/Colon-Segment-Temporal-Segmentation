@@ -1,0 +1,5 @@
+# ninja log v5
+2	13058	1769705953000000000	/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_update.o	221db005990da0ad
+2	18875	1769705958000000000	/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_fwd.o	e97eacacdbd92c6d
+2	30455	1769705970000000000	/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_bwd.o	fbbc1d356f1ef790
+1	34549	1769705974000000000	/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d.o	a2e48d09734dc925

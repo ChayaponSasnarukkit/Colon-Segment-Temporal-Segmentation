@@ -1,0 +1,40 @@
+ninja_required_version = 1.3
+cxx = c++
+nvcc = /opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12.6/bin/nvcc
+
+cflags = -pthread -B /home/csasnaru/.conda/envs/myenv/compiler_compat -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/csasnaru/.conda/envs/myenv/include -fPIC -O2 -isystem /home/csasnaru/.conda/envs/myenv/include -fPIC -I/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d -I/home/csasnaru/.conda/envs/myenv/lib/python3.9/site-packages/torch/include -I/home/csasnaru/.conda/envs/myenv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -I/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12.6/include -I/home/csasnaru/.conda/envs/myenv/include/python3.9 -c
+post_cflags = -O3 -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1018"' -DTORCH_EXTENSION_NAME=causal_conv1d_cuda -std=c++17
+cuda_cflags = -I/lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d -I/home/csasnaru/.conda/envs/myenv/lib/python3.9/site-packages/torch/include -I/home/csasnaru/.conda/envs/myenv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include -I/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12.6/include -I/home/csasnaru/.conda/envs/myenv/include/python3.9 -c
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -U__CUDA_NO_HALF_OPERATORS__ -U__CUDA_NO_HALF_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_OPERATORS__ -U__CUDA_NO_BFLOAT16_CONVERSIONS__ -U__CUDA_NO_BFLOAT162_OPERATORS__ -U__CUDA_NO_BFLOAT162_CONVERSIONS__ --expt-relaxed-constexpr --expt-extended-lambda --use_fast_math --ptxas-options=-v -lineinfo -gencode arch=compute_70,code=sm_70 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 --threads 4 -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1018"' -DTORCH_EXTENSION_NAME=causal_conv1d_cuda -std=c++17
+cuda_dlink_post_cflags = 
+sycl_dlink_post_cflags = 
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+
+
+
+
+build /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d.o: compile /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/csrc/causal_conv1d.cpp
+build /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_bwd.o: cuda_compile /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/csrc/causal_conv1d_bwd.cu
+build /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_fwd.o: cuda_compile /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/csrc/causal_conv1d_fwd.cu
+build /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/build/temp.linux-x86_64-cpython-39/csrc/causal_conv1d_update.o: cuda_compile /lustrefs/disk/home/csasnaru/Colon-Segment-Temporal-Segmentation/causal-conv1d/csrc/causal_conv1d_update.cu
+
+
+
+
+
+
+
+

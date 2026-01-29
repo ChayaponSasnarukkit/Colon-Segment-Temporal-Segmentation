@@ -1,3 +1,15 @@
+import os
+import sys
+sys.setdlopenflags(os.RTLD_GLOBAL | os.RTLD_LAZY)
+import torch
+
+# --- CRITICAL FIX: Force load the compiled kernel ---
+try:
+    import selective_scan_cuda
+    print("✅ Manually loaded selective_scan_cuda")
+except ImportError as e:
+    print(f"❌ Failed to manual load selective_scan_cuda: {e}")
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -214,8 +226,8 @@ def main():
         "gradient_clip_val": 1.0,
         
         # Paths (UPDATE THESE)
-        "master_csv_path": "/path/to/your/master_annotations.csv",
-        "video_root": "/path/to/your/video_files/",
+        "master_csv_path": "/scratch/lt200353-pcllm/location/cas_colon/Video_Label.csv",
+        "video_root": "/scratch/lt200353-pcllm/location/cas_colon/",
         "seed": 42
     }
 
@@ -261,7 +273,7 @@ def main():
     # 5. Callbacks
     # Save best model based on macro F1 or AUROC
     checkpoint_cb = ModelCheckpoint(
-        dirpath="./checkpoints/endomamba_video",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/endomamba_video",
         filename='{epoch:02d}-{val/F1_macro:.4f}',
         save_top_k=3,
         monitor='val/F1_macro',

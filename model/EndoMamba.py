@@ -17,10 +17,10 @@ from timm.models.vision_transformer import _load_weights
 
 import math
 
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
-from _mamba.mamba_ssm.modules.mamba_simple import Mamba
-from _mamba.mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
+#import sys, os
+#sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+from mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 
 
 import torch
@@ -73,9 +73,9 @@ class PositionalEncoding(nn.Module):
         # it will add with tok_emb : [128, 30, 512]
 
 
-MODEL_PATH = '/data/tqy/endomamba_pretrain/'
+MODEL_PATH = '/home/csasnaru/'
 _MODELS = {
-    "videomamba_s16_in1k": os.path.join(MODEL_PATH, "endomamba_small_b48_seqlen16_withteacher_MIX12/checkpoint-499.pth"),
+    "videomamba_s16_in1k": os.path.join(MODEL_PATH, "checkpoint-499.pth"),
 }
 
 class Block(nn.Module):
@@ -726,7 +726,7 @@ def endomamba_small(pretrained=False, **kwargs):
     model.default_cfg = _cfg()
     if pretrained:
         print('Loading pretrained weights...')
-        state_dict = torch.load(_MODELS["videomamba_s16_in1k"], map_location='cpu')
+        state_dict = torch.load(_MODELS["videomamba_s16_in1k"], map_location='cpu', weights_only=False)
         if 'model' in state_dict.keys():
             state_dict = state_dict['model']
         load_state_dict(model, state_dict, center=True)
