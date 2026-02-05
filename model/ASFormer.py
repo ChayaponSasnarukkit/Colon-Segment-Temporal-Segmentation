@@ -518,7 +518,9 @@ def func_eval(dataset, recog_path, file_list):
         f1s[s] = f1
  
     return acc, edit, f1s
-    
+
+from tqdm import tqdm
+from sklearn.metrics import f1_score
 class Trainer:
     def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
         self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
@@ -535,11 +537,18 @@ class Trainer:
         print('LR:{}'.format(learning_rate))
         
         
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
         for epoch in range(num_epochs):
             epoch_loss = 0
             correct = 0
             total = 0
+
+            num_batches = len(batch_gen.list_of_examples) // batch_size
+            if len(batch_gen.list_of_examples) % batch_size != 0:
+                num_batches += 1
+
+            # Initialize tqdm with total batches
+            pbar = tqdm(total=num_batches, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch")
 
             while batch_gen.has_next():
                 batch_input, batch_target, mask, vids = batch_gen.next_batch(batch_size, False)
@@ -561,6 +570,13 @@ class Trainer:
                 _, predicted = torch.max(ps.data[-1], 1)
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
+                pbar.update(1)
+
+                # Optional: Show current loss in the bar description
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
+            # Close the bar after the loop finishes
+            pbar.close()
             
             
             scheduler.step(epoch_loss)
@@ -573,7 +589,7 @@ class Trainer:
                 torch.save(self.model.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".model")
                 torch.save(optimizer.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".opt")
 
-    def test(self, batch_gen_tst, epoch):
+    """def test(self, batch_gen_tst, epoch):
         self.model.eval()
         correct = 0
         total = 0
@@ -589,6 +605,58 @@ class Trainer:
 
         acc = float(correct) / total
         print("---[epoch %d]---: tst acc = %f" % (epoch + 1, acc))
+
+        self.model.train()
+        batch_gen_tst.reset()"""
+    def test(self, batch_gen_tst, epoch):
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        # 1. Initialize lists for F1 calculation
+        all_preds = []
+        all_targets = []
+        
+        # Check your next_batch arguments! 
+        # If you removed the 'warp' argument from the class definition earlier, remove 'if_warp' here too.
+        # batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1) 
+        
+        if_warp = False 
+        
+        with torch.no_grad():
+            while batch_gen_tst.has_next():
+                # Note: Ensure this matches your fixed BatchGenerator definition (1 or 2 args)
+                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1, False) # Removed if_warp based on previous fix
+                
+                batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
+                p = self.model(batch_input, mask)
+                _, predicted = torch.max(p.data[-1], 1)
+                
+                # --- F1 Collection Logic ---
+                valid_mask = mask[:, 0, :] == 1
+                
+                # Filter valid frames and move to CPU
+                active_preds = predicted[valid_mask].cpu().numpy()
+                active_targets = batch_target[valid_mask].cpu().numpy()
+                
+                all_preds.append(active_preds)
+                all_targets.append(active_targets)
+                # ---------------------------
+
+                correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
+                total += torch.sum(mask[:, 0, :]).item()
+
+        # 2. Calculate Metrics
+        acc = float(correct) / total
+        
+        # Concatenate all batches
+        np_preds = np.concatenate(all_preds)
+        np_targets = np.concatenate(all_targets)
+        
+        # Calculate Macro F1
+        f1 = f1_score(np_targets, np_preds, average='macro')
+
+        print("---[epoch %d]---: tst acc = %.4f,  tst F1 = %.4f" % (epoch + 1, acc, f1))
 
         self.model.train()
         batch_gen_tst.reset()

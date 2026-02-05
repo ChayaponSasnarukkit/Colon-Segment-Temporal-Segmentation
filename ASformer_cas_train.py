@@ -27,7 +27,67 @@ class BatchGenerator(object):
             self.list_of_examples = [line.strip() for line in f if line.strip()]
         random.shuffle(self.list_of_examples)
 
-    def next_batch(self, batch_size):
+    def next_batch(self, batch_size, tmp):
+        batch = self.list_of_examples[self.index:self.index + batch_size]
+        self.index += batch_size
+
+        batch_input = []
+        batch_target = []
+        
+        for vid in batch:
+            features = np.load(self.features_path + vid.split('.')[0] + '.npy')
+            
+            # --- FIX START ---
+            # Instead of comparing dimensions, explicitly look for the feature dim (2048)
+            # We want the shape to be (2048, Time)
+            if features.shape[1] == 2048:
+                features = features.T
+            # --- FIX END ---
+
+            features = features[:, ::self.sample_rate]
+            
+            with open(self.gt_path + vid.split('.')[0] + '.txt', 'r') as f:
+                content = f.read().split('\n')
+                if content[-1] == '': content = content[:-1]
+            
+            #labels = [self.actions_dict[c] for c in content][::self.sample_rate]
+            # Use .get(c, -100) -> If 'c' is not in the dict, return -100 (Ignore Index)
+            labels = []
+            for i, c in enumerate(content):
+                # Check if the class is missing from our dictionary
+                if c not in self.actions_dict:
+                    print(f"⚠️  MISSING CLASS: '{c}' found in Video: {vid}, Frame: {i}")
+                    
+                    # Optional: crash here if you want to stop and fix the CSV
+                    # raise KeyError(f"Class '{c}' not found in mapping!")
+                    
+                    # OR: Assign -100 (Ignore) to keep training running
+                    labels.append(-100)
+                else:
+                    labels.append(self.actions_dict[c])
+            
+            # Apply sample rate after building the list
+            labels = labels[::self.sample_rate]
+            # Ensure we don't crash if labels/features length mismatch slightly
+            min_len = min(features.shape[1], len(labels))
+            batch_input.append(features[:, :min_len])
+            batch_target.append(labels[:min_len])
+
+        length_of_sequences = [len(l) for l in batch_target]
+        max_len = max(length_of_sequences)
+        
+        np_batch_input = np.zeros((batch_size, batch_input[0].shape[0], max_len), dtype='float32')
+        np_batch_target = np.ones((batch_size, max_len), dtype='int64') * -100
+        mask = np.zeros((batch_size, 1, max_len), dtype='float32')
+
+        for i in range(batch_size):
+            l = length_of_sequences[i]
+            np_batch_input[i, :, :l] = batch_input[i]
+            np_batch_target[i, :l] = batch_target[i]
+            mask[i, :, :l] = 1
+
+        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask), batch
+    """def next_batch(self, batch_size, tmp):
         batch = self.list_of_examples[self.index:self.index + batch_size]
         self.index += batch_size
 
@@ -61,7 +121,7 @@ class BatchGenerator(object):
             np_batch_target[i, :l] = batch_target[i]
             mask[i, :, :l] = 1
 
-        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask)
+        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask)"""
     
 import torch
 import os
@@ -83,7 +143,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--action', default='train', choices=['train', 'predict'])
     parser.add_argument('--split', default='1', help='Split number (e.g., 1)')
-    parser.add_argument('--num_epochs', type=int, default=20)
+    parser.add_argument('--num_epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.0005)
     return parser.parse_args()
 

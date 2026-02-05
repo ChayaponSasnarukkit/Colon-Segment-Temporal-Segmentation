@@ -92,9 +92,9 @@ def main():
                     # Clamp to video length
                     start_idx = max(0, min(start_idx, num_frames))
                     end_idx = max(0, min(end_idx, num_frames))
-                    
+                    actual_end = min(end_idx + 1, num_frames) 
                     # Assign Label
-                    for i in range(start_idx, end_idx):
+                    for i in range(start_idx, actual_end):
                         labels[i] = cls
                         
             # 4. Save .txt file
