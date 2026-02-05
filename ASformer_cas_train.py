@@ -68,8 +68,6 @@ import os
 import argparse
 import random
 import numpy as np
-from model import Trainer
-from dataset import BatchGenerator
 
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -125,14 +123,7 @@ def main():
 
     # 3. Initialize Trainer
     # Parameters matched to ASFormer paper defaults
-    trainer = Trainer(
-        num_layers=10, 
-        r1=2, r2=2, 
-        num_f_maps=64, 
-        features_dim=2048, 
-        num_classes=num_classes, 
-        channel_mask_rate=0.3
-    )
+    trainer = Trainer(10, 2, 2, 64, 2048, num_classes, 0.3)
 
     # 4. Initialize Data Generators
     # Train Generator
