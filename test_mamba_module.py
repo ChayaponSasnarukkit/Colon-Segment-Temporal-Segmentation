@@ -14,3 +14,4 @@ model = Mamba(
 ).to("cuda")
 y = model(x)
 assert y.shape == x.shape
+print("SUCCEED")

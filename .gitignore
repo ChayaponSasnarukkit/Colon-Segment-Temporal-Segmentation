@@ -1,2 +1,6 @@
 __pycache__
 _mamba/build/
+*.out
+._dbindex_/
+*log/
+*.pth

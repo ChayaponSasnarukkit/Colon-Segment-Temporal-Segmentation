@@ -181,8 +181,8 @@ class RawVideoDataModule(L.LightningDataModule):
         df = pd.read_csv(self.hparams.master_csv_path)
         all_ids = df['VideoID'].unique().tolist()
         
-        train_ids, temp_ids = train_test_split(all_ids, train_size=0.7, random_state=self.hparams.seed)
-        val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=self.hparams.seed)
+        train_ids, val_ids = train_test_split(all_ids, train_size=0.8, random_state=self.hparams.seed)
+        # val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=self.hparams.seed)
         
         if stage == 'fit' or stage is None:
             self.train_ds = RawVideoColonDataset(

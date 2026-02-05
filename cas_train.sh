@@ -8,7 +8,7 @@
 #SBATCH -J TEST                         # Specify job name
 
 module load cuda 
-module load Mamba/23.11.0-0             # Load the module that you want to use
+module load Mamba             # Load the module that you want to use
 
 conda activate myenv                    # Activate your environment
 echo $CUDA_HOME

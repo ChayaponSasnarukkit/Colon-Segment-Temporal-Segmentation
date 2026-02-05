@@ -62,8 +62,10 @@ class EndoMambaModule(L.LightningModule):
         # 1. Initialize Model
         self.model = endomamba_small(
             pretrained=config["pretrained"], 
-            num_classes=config["num_classes"]
+            num_classes=config["num_classes"],
+            with_cls_token=False
         )
+        print(self.model)
 
         # 2. Loss Function
         self.register_buffer('class_weights', class_weights)
@@ -208,13 +210,13 @@ def main():
         # Model Hyperparameters
         "num_classes": 10,  # Updated to match your 10 anatomy classes
         "lr": 1e-4,
-        "weight_decay": 0.05,
+        "weight_decay": 0.01,
         "pretrained": True,
         
         # Data Hyperparameters
-        "batch_size": 8,       # Lower batch size for video (memory heavy)
-        "num_workers": 4,
-        "context_length": 8,  # Number of frames (T)
+        "batch_size": 32,       # Lower batch size for video (memory heavy)
+        "num_workers": 8,
+        "context_length": 2,  # Number of frames (T)
         "downsample_factor": 60, # 1 FPS if video is 60fps
         "height": 224,
         "width": 224,
@@ -273,7 +275,7 @@ def main():
     # 5. Callbacks
     # Save best model based on macro F1 or AUROC
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/endomamba_video",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/8fix_endomamba_video_last",
         filename='{epoch:02d}-{val/F1_macro:.4f}',
         save_top_k=3,
         monitor='val/F1_macro',
@@ -284,7 +286,7 @@ def main():
 
     logger = TensorBoardLogger(
         save_dir='./tb_log', 
-        version='video_run_v1'
+        version='8fix_video_run_last'
     )
 
     # 6. Trainer

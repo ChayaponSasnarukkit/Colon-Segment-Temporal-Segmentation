@@ -327,7 +327,10 @@ class EndoMamba(nn.Module):
         self.with_cls_token = with_cls_token
         if with_cls_token:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches +1, self.embed_dim))
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches +1, self.embed_dim))
+        else:
+            print("no cls")
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, self.embed_dim))
         self.temporal_pos_embedding = PositionalEncoding(embed_dim, 8192, device=device)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
@@ -540,43 +543,6 @@ class EndoMamba(nn.Module):
     
     def forward(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
         """
-        Modified for Causal Context Classification.
-        Forward pass of the model.
-
-        Args:
-            x (Tensor): Input tensor of shape (B, C, T, H, W).
-            inference_params (List[Optional[Tensor]]): A list of inference parameters for temporal blocks.
-                                                     The length should be equal to the number of temporal layers.
-                                                     Each entry corresponds to a temporal block's cache.
-
-        Returns:
-            Tensor: Output logits of shape (B, T, num_classes).
-            Optional inference_params if provided.
-        """
-        # Extract Features
-        # x shape becomes: (B, T, N, C) where N is (patches + cls_token)
-        x, inference_params = self.forward_features(x, inference_params)
-
-        if self.with_head:
-            # x shape: (Batch, Time, Tokens, Dim)
-            
-            # Pool spatial tokens (dim 2) to get 1 vector per time step
-            if self.with_cls_token:
-                # Take CLS token for each time step
-                x = x[:, :, 0, :]  # Shape: (B, T, C)
-            else:
-                # Average pool spatial tokens
-                x = x.mean(dim=2)  # Shape: (B, T, C)
-
-            # Pass through classifier
-            logits = self.head(self.head_drop(x)) # Shape: (B, T, NumClasses)
-            
-            return logits
-
-        return x
-            
-    def forward(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
-        """
         Forward pass of the model.
 
         Args:
@@ -592,8 +558,16 @@ class EndoMamba(nn.Module):
         x, inference_params = self.forward_features(x, inference_params)
         if self.with_head:
             B, T, N, C = x.shape
-            x = x[:, :, 0, :].mean(dim=1)  #  (B, T, N, C) --> (B, T, C) --> (B, C)
+            if self.with_cls_token:
+                whole_seq = False
+                if whole_seq ==True:
+                    x = x[:, :, 0, :].mean(dim=1)  #  (B, T, N, C) --> (B, T, C) --> (B, C)
+                else:
+                    x = x[:, -1, 0, :]
             # x = rearrange(x, 'b t c -> b (t c)')  # Shape: (B, T*N, C)
+            else:
+                last_frame_state = x[:, -1, :, :]
+                x = last_frame_state.mean(dim=1)
             x = self.head(self.head_drop(x))
         if inference_params is not None:
             return x, inference_params
