@@ -720,7 +720,7 @@ def endomamba_tiny(pretrained=False, **kwargs):
 
 
 @register_model
-def endomamba_small(pretrained=False, **kwargs):
+def endomamba_small(pretrained=True, **kwargs):
     """
     Create a small VisionMamba model.
 

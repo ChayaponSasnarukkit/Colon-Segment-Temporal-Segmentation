@@ -269,7 +269,7 @@ class ExplicitMatrixTransition(nn.Module):
         return prior_prob, T_matrix
     
 class GatedFusionBayesianNeuralFilter_Explicit(nn.Module):
-    def __init__(self, backbone, num_classes=8, embed_dim=768, state_dim=128):
+    def __init__(self, backbone, num_classes=8, embed_dim=768, state_dim=768):
         super().__init__()
         self.backbone = backbone
         self.num_classes = num_classes
@@ -327,20 +327,35 @@ class GatedFusionBayesianNeuralFilter_Explicit(nn.Module):
             "belief": F.softmax(posterior_logits, dim=1),
             "transition_matrix": T_matrix # Return for visualization/analysis
         }
-    
-class Trainer(pl.LightningModule):
-    def __init__(self, model, learning_rate=1e-4, num_classes=8):
+
+import lightning as L
+from torchmetrics import MetricCollection
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassF1Score,
+    MulticlassAUROC,
+    MulticlassPrecision,
+    MulticlassRecall,
+)
+
+# Optimizer & Scheduler
+from transformers import get_cosine_schedule_with_warmup
+import math
+
+class PLWrapper(L.LightningModule):
+    def __init__(self, model, config):
         super().__init__()
         self.save_hyperparameters(ignore=['model'])
+        self.config = config
         self.model = model
-        self.num_classes = num_classes
+        self.num_classes = self.config["num_classes"]
         
         # Loss
         self.criterion = nn.CrossEntropyLoss()
         
         # Metrics
-        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes)
-        self.val_f1 = F1Score(task="multiclass", num_classes=num_classes, average='macro')
+        self.val_acc = MulticlassAccuracy(num_classes=self.num_classes)
+        self.val_f1 = MulticlassF1Score(num_classes=self.num_classes, average='macro')
 
         # --- STATEFUL VALIDATION VARIABLES ---
         # We store these to carry memory across batches
@@ -417,5 +432,81 @@ class Trainer(pl.LightningModule):
         return val_loss
 
     def configure_optimizers(self):
-        return optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        """
+        Sets up AdamW with parameter grouping (weight decay handling AND differential LR) 
+        and Cosine Scheduler with Warmup.
+        """
+        # 1. Define Learning Rates
+        head_lr = self.config["lr"]
+        backbone_lr = head_lr * 0.5  # <--- Half the LR for backbone
+        weight_decay = self.config.get("weight_decay", 0.01)
 
+        # 2. Identify Parameters
+        param_optimizer = list(self.model.named_parameters())
+        no_decay = ['bias', 'LayerNorm.weight', 'norm.weight']
+
+        # Helper to check if a parameter belongs to the backbone
+        # Assumes your model has 'self.backbone' so names start with "backbone."
+        def is_backbone(n):
+            return n.startswith("backbone.")
+
+        optimizer_grouped_parameters = [
+            # --- Group A: Backbone (Low LR) ---
+            {
+                'params': [p for n, p in param_optimizer if is_backbone(n) and not any(nd in n for nd in no_decay)],
+                'weight_decay': weight_decay,
+                'lr': backbone_lr,
+            },
+            {
+                'params': [p for n, p in param_optimizer if is_backbone(n) and any(nd in n for nd in no_decay)],
+                'weight_decay': 0.0,
+                'lr': backbone_lr,
+            },
+            
+            # --- Group B: Head / Rest (High LR) ---
+            {
+                'params': [p for n, p in param_optimizer if not is_backbone(n) and not any(nd in n for nd in no_decay)],
+                'weight_decay': weight_decay,
+                'lr': head_lr,
+            },
+            {
+                'params': [p for n, p in param_optimizer if not is_backbone(n) and any(nd in n for nd in no_decay)],
+                'weight_decay': 0.0,
+                'lr': head_lr,
+            }
+        ]
+
+        # Initialize Optimizer (Base LR is set to head_lr, but groups override it anyway)
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters, 
+            lr=head_lr 
+        )
+
+        # Scheduler Calculation (Unchanged)
+        TOTAL_SAMPLES = int(self.all_samples)
+        BATCH_SIZE = self.config["batch_size"]
+        GRAD_ACCUM_STEPS = self.config.get("grad_accum_steps", 1)
+        EPOCHS = self.config["epochs"]
+        
+        total_batches = TOTAL_SAMPLES // BATCH_SIZE
+        num_training_steps = math.ceil(total_batches / GRAD_ACCUM_STEPS) * EPOCHS
+        # Note: You had 0.001 (0.1%) in your code, usually 0.05 or 0.1 (10%) is standard, 
+        # but I kept your original logic here.
+        num_warmup_steps = int(num_training_steps * 0.001) 
+
+        print(f"📉 Scheduler: {num_warmup_steps} warmup steps, {num_training_steps} total steps.")
+
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+
+        return {
+            'optimizer': optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
