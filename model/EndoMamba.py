@@ -414,6 +414,18 @@ class EndoMamba(nn.Module):
     @torch.jit.ignore
     def load_pretrained(self, checkpoint_path, prefix=""):
         _load_weights(self, checkpoint_path, prefix)
+    
+    def finalize_norm(self, hidden_states, residual):
+        """Helper to apply the final norm block to any intermediate state."""
+        if not self.fused_add_norm:
+            res = (residual + hidden_states) if residual is not None else hidden_states
+            return self.norm_f(res.to(dtype=self.norm_f.weight.dtype))
+        else:
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
+            return fused_add_norm_fn(
+                hidden_states, self.norm_f.weight, self.norm_f.bias, eps=self.norm_f.eps,
+                residual=residual, prenorm=False, residual_in_fp32=self.residual_in_fp32
+            )
 
     def forward_features(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
         """
@@ -514,6 +526,11 @@ class EndoMamba(nn.Module):
                 if residual is not None:
                     residual = rearrange(residual, 'b (t n) m -> b t n m', n=x.shape[2], t=T)
 
+            if idx < len(self.layers) - 1:
+                if layer.bimamba and not self.layers[idx+1].bimamba:
+                     # This is the transition point!
+                     # Normalize current state to get clean features
+                     spatial_out = self.finalize_norm(hidden_states, residual)
         # # Final normalization
         if not self.fused_add_norm:
             if residual is None:
@@ -539,40 +556,66 @@ class EndoMamba(nn.Module):
         # Average over the spatial dimension (N+1*T)
         # frame_features = rearrange(hidden_states, 'b t n c -> b (t n) c', n=x.shape[2], t=T)  # Shape: (B, T*N, C)
         
-        return hidden_states, inference_params
+        return hidden_states, spatial_out, inference_params
     
-    def forward(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
-        """
-        Forward pass of the model.
-
-        Args:
-            x (Tensor): Input tensor of shape (B, C, T, H, W).
-            inference_params (List[Optional[Tensor]]): A list of inference parameters for temporal blocks.
-                                                     The length should be equal to the number of temporal layers.
-                                                     Each entry corresponds to a temporal block's cache.
-
-        Returns:
-            Tensor: Output logits of shape (B, T, num_classes).
-            Optional inference_params if provided.
-        """
-        x, inference_params = self.forward_features(x, inference_params)
-        if self.with_head:
-            B, T, N, C = x.shape
-            if self.with_cls_token:
-                whole_seq = False
-                if whole_seq ==True:
-                    x = x[:, :, 0, :].mean(dim=1)  #  (B, T, N, C) --> (B, T, C) --> (B, C)
-                else:
-                    x = x[:, -1, 0, :]
-            # x = rearrange(x, 'b t c -> b (t c)')  # Shape: (B, T*N, C)
-            else:
-                last_frame_state = x[:, -1, :, :]
-                x = last_frame_state.mean(dim=1)
-            x = self.head(self.head_drop(x))
-        if inference_params is not None:
-            return x, inference_params
+    def forward(self, x, inference_params=None):
+        # spatial_feat, temporal_feat: Both are [B, T, N, C]
+        hidden_states, spatial_out, inference_params = self.forward_features(x, inference_params)
+        
+        # --- 1. Vision Feature (Likelihood) ---
+        # "Use the last frame from the last spatial layer"
+        # Extract last frame: index -1 in dim 1 (T)
+        last_frame_spatial = spatial_out[:, -1, :, :] # [B, N, C]
+        
+        if self.with_cls_token:
+            # If CLS token exists, it's usually at index 0
+            vision_out = last_frame_spatial[:, 0, :] # [B, C]
         else:
-            return x
+            # Average pool the spatial tokens
+            vision_out = last_frame_spatial.mean(dim=1) # [B, C]
+
+        # --- 2. Motion Feature (Prior) ---
+        # "GAP from the whole context to the final output"
+        # Average over T and N
+        motion_out = hidden_states.mean(dim=(1, 2)) # [B, C]
+
+        # Return dictionary for the Filter
+        return {
+            "vision": vision_out, 
+            "motion": motion_out
+        }
+    # def forward(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
+    #     """
+    #     Forward pass of the model.
+
+    #     Args:
+    #         x (Tensor): Input tensor of shape (B, C, T, H, W).
+    #         inference_params (List[Optional[Tensor]]): A list of inference parameters for temporal blocks.
+    #                                                  The length should be equal to the number of temporal layers.
+    #                                                  Each entry corresponds to a temporal block's cache.
+
+    #     Returns:
+    #         Tensor: Output logits of shape (B, T, num_classes).
+    #         Optional inference_params if provided.
+    #     """
+    #     x, inference_params = self.forward_features(x, inference_params)
+    #     if self.with_head:
+    #         B, T, N, C = x.shape
+    #         if self.with_cls_token:
+    #             whole_seq = False
+    #             if whole_seq ==True:
+    #                 x = x[:, :, 0, :].mean(dim=1)  #  (B, T, N, C) --> (B, T, C) --> (B, C)
+    #             else:
+    #                 x = x[:, -1, 0, :]
+    #         # x = rearrange(x, 'b t c -> b (t c)')  # Shape: (B, T*N, C)
+    #         else:
+    #             last_frame_state = x[:, -1, :, :]
+    #             x = last_frame_state.mean(dim=1)
+    #         x = self.head(self.head_drop(x))
+    #     if inference_params is not None:
+    #         return x, inference_params
+    #     else:
+    #         return x
 
 
 def inflate_weight(weight_2d, time_dim, center=True):
