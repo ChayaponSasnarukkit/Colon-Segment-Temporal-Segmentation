@@ -5,81 +5,6 @@ import torch.optim as optim
 from einops import rearrange
 from torch.utils.data import DataLoader
 
-# ==========================================
-# PART 1: The Backbone (Modified Surgformer)
-# ==========================================
-# We assume the basic blocks (Attention_Spatial, Block, etc.) 
-# are available or pasted above. 
-# Here, I modify the main class to implement the "Joint Backbone" strategy.
-
-class JointSurgformer(nn.Module):
-    """
-    Modified Surgformer that returns TWO feature vectors:
-    1. Motion Feature: From the [CLS] token (Global Spatio-Temporal context)
-    2. Vision Feature: From the tokens of the LAST frame (Spatial context at time t)
-    """
-    def __init__(self, base_model):
-        super().__init__()
-        self.base = base_model  # This is your existing 'VisionTransformer' instance
-        
-        # Remove the original head, we don't need it
-        self.base.head = nn.Identity() 
-        self.base.fc_dropout = nn.Identity()
-
-    def forward(self, x):
-        # x shape: [B, C, T, H, W]
-        B, C, T, H, W = x.shape
-        
-        # 1. Patch Embedding & Positional Encoding (Standard Surgformer)
-        x = self.base.patch_embed(x) # [B, T, K, C]
-        _, _, K, _ = x.shape
-        
-        # Add Spatial Pos Embed
-        x = rearrange(x, "b t k c -> (b t) k c")
-        cls_tokens = self.base.cls_token.expand(x.size(0), -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1) # [BT, K+1, C]
-        x = x + self.base.pos_embed
-        x = self.base.pos_drop(x)
-
-        # Add Temporal Pos Embed
-        cls_tokens = x[:B, 0, :].unsqueeze(1)
-        x = x[:, 1:]
-        x = rearrange(x, "(b t) k c -> (b k) t c", b=B)
-        x = x + self.base.time_embed
-        x = self.base.time_drop(x)
-        x = rearrange(x, "(b k) t c -> b (k t) c", b=B)
-        x = torch.cat((cls_tokens, x), dim=1) # [B, KT+1, C]
-
-        # 2. Transformer Encoder Blocks
-        for blk in self.base.blocks:
-            x = blk(x, B, T, K)
-        x = self.base.norm(x)
-
-        # ====================================================
-        # KEY MODIFICATION: Dual-Head Feature Extraction
-        # ====================================================
-        
-        # A. Motion Feature (Global Context)
-        # The [CLS] token at index 0 aggregates info from the whole clip
-        motion_feat = x[:, 0]  # [B, Embed_Dim]
-
-        # B. Vision Feature (Current Frame Focus)
-        # We need the spatial tokens corresponding to the LAST frame (time T)
-        # The sequence structure is [CLS, Frame1_Tokens, Frame2_Tokens, ..., FrameT_Tokens]
-        # Each frame has K tokens.
-        
-        # Calculate start index of the last frame
-        start_idx = 1 + (T - 1) * K 
-        end_idx = start_idx + K
-        
-        # Extract patches for the last frame only
-        last_frame_tokens = x[:, start_idx:end_idx, :] # [B, K, Embed_Dim]
-        
-        # Global Average Pooling over the spatial dimensions of the last frame
-        vision_feat = torch.mean(last_frame_tokens, dim=1) # [B, Embed_Dim]
-
-        return vision_feat, motion_feat
-
 class GRUFusion(nn.Module):
     """
     Computes a transition: h_new = (1-z) * h_old + z * h_candidate
@@ -141,7 +66,7 @@ class ResidualFusion(nn.Module):
         return self.norm(out)
     
 # ==========================================
-# PART 2: The Bayesian Neural Filter
+# The Bayesian Neural Filter
 # ==========================================
 
 class GatedFusionBayesianNeuralFilter_Implicit(nn.Module):
@@ -371,8 +296,40 @@ class PLWrapper(L.LightningModule):
         # We ignore video_id here
         video_clip, current_label, prev_label_gt, _ = batch
         
-        # Pass Ground Truth (prev_label_gt) to simulate "Teacher Forcing"
-        outputs = self(video_clip, prev_label_gt)
+        one_hot_gt = F.one_hot(
+            prev_label_gt, num_classes=self.num_classes
+        ).float()
+
+        # --- 2. Add Random Noise & Softmax ---
+        # use_noise = getattr(self, "use_input_noise", True)
+        
+        if self.config.get("use_noise", True):
+            # A. Create Random Noise (Gaussian/Normal distribution)
+            # This creates values like [-0.5, 0.2, 1.1, -0.1...]
+            noise = torch.randn_like(one_hot_gt, device=self.device)
+            
+            # B. Define "Confidence" vs "Noise" strength
+            # High 'confidence_scale' (e.g., 10.0) ensures the GT remains the Argmax.
+            # 'noise_level' controls how messy the other classes look.
+            confidence_scale = self.config.get("confidence_scale", 3.5) 
+            noise_level = self.config.get("noise_level", 1.0)  
+
+            # C. Create "Noisy Logits"
+            # We multiply the One-Hot by a large number so the correct class 
+            # has a much higher logit than the others (e.g., 10.0 vs 0.0).
+            # Then we add the random noise.
+            noisy_logits = (one_hot_gt * confidence_scale) + (noise * noise_level)
+            
+            # D. Apply Softmax (User Request)
+            # This squashes logits into a valid probability distribution (Sum = 1.0).
+            # The GT will likely be ~0.90, and others will be ~0.01, ~0.03, etc.
+            prev_belief = F.softmax(noisy_logits, dim=1)
+            
+        else:
+            # Clean Teacher Forcing (Strict One-Hot)
+            prev_belief = one_hot_gt
+
+        outputs = self(video_clip, prev_belief)
         
         # Losses
         loss_post = self.criterion(outputs["posterior"], current_label)
@@ -420,10 +377,11 @@ class PLWrapper(L.LightningModule):
         # We take the posterior (Logits) -> Softmax -> Store as next input
         # Detach is crucial to stop gradients (though in val it doesn't matter much)
         self.current_belief = F.softmax(outputs["posterior"], dim=1).detach()
-        pred_idx = torch.argmax(self.current_belief, dim=1) 
-        
-        # 2. Convert to One-Hot (Same format as Ground Truth in training)
-        self.current_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
+        if self.config.get("use_noise", True):
+            pred_idx = torch.argmax(self.current_belief, dim=1) 
+            
+            # 2. Convert to One-Hot (Same format as Ground Truth in training)
+            self.current_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
         # --- 4. Metrics ---
         val_loss = self.criterion(outputs["posterior"], current_label)
         self.val_acc(outputs["posterior"], current_label)
