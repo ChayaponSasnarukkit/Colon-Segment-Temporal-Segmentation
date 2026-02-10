@@ -452,9 +452,8 @@ class PLWrapper(L.LightningModule):
         
         total_batches = TOTAL_SAMPLES // BATCH_SIZE
         num_training_steps = math.ceil(total_batches / GRAD_ACCUM_STEPS) * EPOCHS
-        # Note: You had 0.001 (0.1%) in your code, usually 0.05 or 0.1 (10%) is standard, 
-        # but I kept your original logic here.
-        num_warmup_steps = int(num_training_steps * 0.001) 
+        warmup_percent = self.config.get("warmup", 0.01)
+        num_warmup_steps = int(num_training_steps * warmup_percent) 
 
         print(f"📉 Scheduler: {num_warmup_steps} warmup steps, {num_training_steps} total steps.")
 

@@ -50,7 +50,7 @@ CONFIG = {
     "use_noise": True,
     "confidence_scale": 2.0,
     "noise_level": 1.0,
-
+    "warmup": 0.001
 }
 
 # ==========================================
