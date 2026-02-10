@@ -580,10 +580,8 @@ class EndoMamba(nn.Module):
         motion_out = hidden_states.mean(dim=(1, 2)) # [B, C]
 
         # Return dictionary for the Filter
-        return {
-            "vision": vision_out, 
-            "motion": motion_out
-        }
+        return vision_out, motion_out
+
     # def forward(self, x, inference_params: Optional[List[Optional[Tensor]]] = None):
     #     """
     #     Forward pass of the model.

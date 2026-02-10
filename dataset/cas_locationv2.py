@@ -131,7 +131,7 @@ class CasColonDataset(Dataset):
         if self.mode != "train":
             self.data_resize = video_transforms.Compose([
                 video_transforms.Resize(
-                    size=(short_side_size, short_side_size),
+                    size=(crop_size, crop_size),
                     interpolation="bilinear",
                 )
             ])
@@ -215,11 +215,11 @@ class CasColonDataset(Dataset):
                 end_f = max(0, min(end_f, num_frames))
                 
                 # Fill the map
-                label_map[start_f:end_f] = cls_idx
+                label_map[start_f:end_f+1] = cls_idx
                 
         return label_map
     
-    def _make_dataset(self):
+    """def _make_dataset(self):
         samples = []
         df = pd.read_csv(self.csv_path)
         clip_span = self.clip_len * self.sampling_rate
@@ -272,6 +272,68 @@ class CasColonDataset(Dataset):
                 cnt +=1
                 print(x['prev_label'])
         print(f"there are {cnt} unlabled prev frames")
+        return samples"""
+    def _make_dataset(self):
+        samples = []
+        df = pd.read_csv(self.csv_path)
+        # clip_span is the index of the first frame we can legally sample
+        clip_span = self.clip_len * self.sampling_rate
+
+        for _, row in df.iterrows():
+            vid_id = str(row['VideoID'])
+            vid_dir = os.path.join(self.cache_root, vid_id)
+            if not os.path.exists(vid_dir): continue
+
+            # 1. Count Frames
+            frames_on_disk = len([n for n in os.listdir(vid_dir) if n.endswith('.jpg')])
+
+            # 2. Build Label Map (Must be continuous!)
+            # Ensure _build_label_map fills gaps with a 'Background' class if needed
+            label_map = self._build_label_map(row, frames_on_disk)
+
+            # 3. Calculate Expected Count (For debugging)
+            if frames_on_disk > clip_span:
+                expected_range = range(clip_span, frames_on_disk, self.stride)
+                expected_count = len(expected_range)
+            else:
+                expected_count = 0
+
+            current_vid_samples = []
+
+            # 4. Sliding Window Loop (Timeline Driven)
+            # strictly follows range(start, end, stride)
+            for f in range(clip_span, frames_on_disk, self.stride):
+
+                # Get label (defaults to -1 if unannotated)
+                label = label_map[f]
+
+                # Look back
+                prev_idx = f - self.stride
+                prev_label = label_map[prev_idx] if prev_idx >= 0 else label
+
+                # Handle unlabeled gaps
+                # If your task requires ignoring background, you might skip here,
+                # BUT that will cause the assertion to fail.
+                # Ideally, you assign a BACKGROUND_CLASS_ID (e.g., 0) instead of skipping.
+                if label == -1: print("wrong Label") # Example: Set to background
+                if prev_label == -1: print("wrong prev Label")
+
+                sample = {
+                    'video_id': vid_id,
+                    'frame_idx': f,
+                    'label': int(label),
+                    'prev_label': int(prev_label),
+                    'max_frame': frames_on_disk
+                }
+                current_vid_samples.append(sample)
+
+            # 5. Verify
+            if len(current_vid_samples) != expected_count:
+                print(f"⚠️ Video {vid_id}: Expected {expected_count}, Got {len(current_vid_samples)}")
+
+            samples.extend(current_vid_samples)
+        print("FINISH MAKING DATASET")
+
         return samples
 
     def _load_clip(self, video_id, target_frame_idx, max_frames):
@@ -389,7 +451,7 @@ if __name__ == "__main__":
     # Define paths
     csv_file = "/scratch/lt200353-pcllm/location/cas_colon/Video_Label.csv"
     video_folder = "/scratch/lt200353-pcllm/location/cas_colon/" 
-    cache_folder = "/scratch/lt200353-pcllm/location/cas_colon/"  # Frames will be saved here automatically
+    cache_folder = "/scratch/lt200353-pcllm/location/cas_colon/cached_images"  # Frames will be saved here automatically
 
     # Initialize Dataset
     dataset = CasColonDataset(

@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import os
 
 # Modern Metrics
-from model.BayesianFilter import PLWrapper, GatedFusionBayesianNeuralFilter_Explicit
+from model.BayesianFilter import PLWrapper, GatedFusionBayesianNeuralFilter_Implicit
 from model.EndoMamba import endomamba_small
 from dataset.cas_locationv2 import CasColonDataset
 
@@ -33,7 +33,7 @@ CONFIG = {
     
     # Training Hyperparams
     "batch_size": 16,         # Adjust based on GPU VRAM
-    "epochs": 10,
+    "epochs": 20,
     "lr": 2e-4,              # Learning rate for Head/Filter
     "weight_decay": 1e-4,
     "grad_accum_steps": 4,
@@ -112,7 +112,7 @@ def main():
     )
     
     # B. Define Bayesian Filter Model
-    model = GatedFusionBayesianNeuralFilter_Explicit(
+    model = GatedFusionBayesianNeuralFilter_Implicit(
         backbone=backbone,
         num_classes=CONFIG["num_classes"],
         embed_dim=CONFIG["embed_dim"],  # Must match backbone output (512 for R3D-18)
@@ -126,7 +126,7 @@ def main():
     
     
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/explicit_bayes",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/implicit_bayes",
         filename='{epoch:02d}',
         save_top_k=10,
         monitor='train_loss',
@@ -137,7 +137,7 @@ def main():
 
     logger = TensorBoardLogger(
         save_dir='./tb_log', 
-        version='explicit_bayes'
+        version='implicit_bayes'
     )
 
     trainer = L.Trainer(

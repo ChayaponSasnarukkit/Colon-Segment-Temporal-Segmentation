@@ -343,8 +343,9 @@ from transformers import get_cosine_schedule_with_warmup
 import math
 
 class PLWrapper(L.LightningModule):
-    def __init__(self, model, config):
+    def __init__(self, model, config, all_samples):
         super().__init__()
+        self.all_samples = all_samples
         self.save_hyperparameters(ignore=['model'])
         self.config = config
         self.model = model
@@ -419,7 +420,10 @@ class PLWrapper(L.LightningModule):
         # We take the posterior (Logits) -> Softmax -> Store as next input
         # Detach is crucial to stop gradients (though in val it doesn't matter much)
         self.current_belief = F.softmax(outputs["posterior"], dim=1).detach()
+        pred_idx = torch.argmax(self.current_belief, dim=1) 
         
+        # 2. Convert to One-Hot (Same format as Ground Truth in training)
+        self.current_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
         # --- 4. Metrics ---
         val_loss = self.criterion(outputs["posterior"], current_label)
         self.val_acc(outputs["posterior"], current_label)
