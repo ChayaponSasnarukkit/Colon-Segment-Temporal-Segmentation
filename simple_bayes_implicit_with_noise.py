@@ -48,7 +48,7 @@ CONFIG = {
     "crop_size": 224,
 
     "use_noise": True,
-    "confidence_scale": 3.5,
+    "confidence_scale": 2.0,
     "noise_level": 1.0,
 
 }
@@ -131,7 +131,7 @@ def main():
     
     
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/noisyimplicit_bayes",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/2noisyimplicit_bayes",
         filename='{epoch:02d}',
         save_top_k=10,
         monitor='train_loss',
@@ -142,7 +142,7 @@ def main():
 
     logger = TensorBoardLogger(
         save_dir='./tb_log', 
-        version='noisyimplicit_bayes'
+        version='2noisyimplicit_bayes'
     )
 
     trainer = L.Trainer(
@@ -164,7 +164,7 @@ def main():
         config=CONFIG,
         all_samples=len(train_dataset)
     )
-
+    print(lightning_module.config)
     # --- 4. Start Training ---
     print("🔥 Start Training Loop")
     trainer.fit(lightning_module, train_loader, val_loader)
