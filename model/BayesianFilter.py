@@ -253,6 +253,59 @@ class GatedFusionBayesianNeuralFilter_Explicit(nn.Module):
             "transition_matrix": T_matrix # Return for visualization/analysis
         }
 
+class BayesianNeuralFilter_Explicit(nn.Module):
+    # no fusion version => This should help with the exposure bias problem
+    def __init__(self, backbone, num_classes=8, embed_dim=768, state_dim=768):
+        super().__init__()
+        self.backbone = backbone
+        self.num_classes = num_classes
+        
+        # Motion Expert (EXPLICIT MATRIX VERSION) ---
+        self.motion_module = ExplicitMatrixTransition(embed_dim, num_classes)
+
+        # --- 3. Vision Expert (Likelihood) ---
+        self.vision_head = nn.Sequential(
+            nn.Linear(embed_dim, state_dim),
+            nn.GELU(),
+            nn.Linear(state_dim, num_classes)
+        )
+
+    def forward(self, x_clip, prev_state_input):
+        # 1. Handle Input (Indices vs Probs)
+        if prev_state_input.dim() == 1 and prev_state_input.dtype == torch.long:
+            # Training: One-hot encode the hard label
+            prev_dist = F.one_hot(prev_state_input, num_classes=self.num_classes).float()
+        else:
+            # Inference: Use the soft belief directly
+            prev_dist = prev_state_input
+
+        # 2. Get Features
+        # prev_emb is still needed for the Vision Expert's context
+        vision_feat, motion_feat = self.backbone(x_clip)
+        
+        # 3. Motion Expert (Explicit Matrix Update)
+        # Returns PROBABILITIES, not logits
+        prior_prob, T_matrix = self.motion_module(motion_feat, prev_dist)
+        
+        # CRITICAL STEP: Convert Probability to Logits for Fusion
+        # We add epsilon to prevent log(0)
+        epsilon = 1e-9
+        prior_logits = torch.log(prior_prob + epsilon)
+        
+        # 4. Vision Expert (Likelihood)
+        likelihood_logits = self.vision_head(vision_feat)
+        
+        # 5. Bayesian Fusion (Log Space)
+        posterior_logits = prior_logits + likelihood_logits
+        
+        return {
+            "posterior": posterior_logits,
+            "prior": prior_logits,      # These are now Log-Probs
+            "likelihood": likelihood_logits,
+            "belief": F.softmax(posterior_logits, dim=1),
+            "transition_matrix": T_matrix # Return for visualization/analysis
+        }
+    
 import lightning as L
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (

@@ -87,6 +87,8 @@ class CasColonDataset(Dataset):
         extracted_fps=60,  # The FPS of your source video
         crop_size=224,
         short_side_size=256,
+        transition_factor = 2,
+        oversampling=True,
         args=None 
     ):
         self.csv_path = csv_path
@@ -101,6 +103,8 @@ class CasColonDataset(Dataset):
         self.extracted_fps = extracted_fps
         self.crop_size = crop_size
         self.short_side_size = short_side_size
+        self.transition_factor = transition_factor
+        self.oversampling = oversampling
         
         # Default Args wrapper
         class DefaultArgs:
@@ -273,6 +277,7 @@ class CasColonDataset(Dataset):
                 print(x['prev_label'])
         print(f"there are {cnt} unlabled prev frames")
         return samples"""
+    
     def _make_dataset(self):
         samples = []
         df = pd.read_csv(self.csv_path)
@@ -299,6 +304,7 @@ class CasColonDataset(Dataset):
                 expected_count = 0
 
             current_vid_samples = []
+            new_expected_count = expected_count
 
             # 4. Sliding Window Loop (Timeline Driven)
             # strictly follows range(start, end, stride)
@@ -327,9 +333,16 @@ class CasColonDataset(Dataset):
                 }
                 current_vid_samples.append(sample)
 
+                if self.mode == "train" and self.oversampling==True and label != prev_label:
+                    dynamic_count = expected_count // (len(self.classes) * 2)
+                    oversample_count = max(dynamic_count, 5)
+                    new_expected_count += oversample_count
+                    for _ in range(oversample_count):
+                        current_vid_samples.append(sample)
+
             # 5. Verify
-            if len(current_vid_samples) != expected_count:
-                print(f"⚠️ Video {vid_id}: Expected {expected_count}, Got {len(current_vid_samples)}")
+            if len(current_vid_samples) != new_expected_count:
+                print(f"⚠️ Video {vid_id}: Expected {new_expected_count}, Got {len(current_vid_samples)}")
 
             samples.extend(current_vid_samples)
         print("FINISH MAKING DATASET")
