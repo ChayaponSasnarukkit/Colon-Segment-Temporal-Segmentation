@@ -48,9 +48,9 @@ CONFIG = {
     "crop_size": 224,
 
     "use_noise": True,
-    "confidence_scale": 2.0,
+    "confidence_scale": 3.5,
     "noise_level": 1.0,
-    "warmup": 0.001
+    "warmup": 0.1
 }
 
 # ==========================================

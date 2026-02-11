@@ -388,7 +388,7 @@ class PLWrapper(L.LightningModule):
         loss_prior = self.criterion(outputs["prior"], current_label)
         loss_like = self.criterion(outputs["likelihood"], current_label)
         
-        total_loss = loss_post + 0.5 * loss_prior + 0.5 * loss_like
+        total_loss = loss_post + 0.5 * loss_prior + 0.25 * loss_like
         
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
@@ -406,44 +406,132 @@ class PLWrapper(L.LightningModule):
         video_clip, current_label, _, video_id = batch 
         
         # Unpack list (because batch_size=1 wraps strings in a tuple)
-        # video_id comes out as ('Video_01',)
         current_vid_id = video_id[0] 
+        current_gt = current_label.item()
+        
+        # --- DEBUG INIT ---
+        # Toggle this flag manually or via config
+        DEBUG = self.config.get("debug_mode", False) and batch_idx < 50 # Limit to first 50 frames to avoid spam
         
         # --- 1. State Management ---
-        # If this is a new video, or the very first batch
+        # If this is a new video
         if current_vid_id != self.last_video_id:
-            # RESET BELIEF: Start with Uniform Distribution (We know nothing)
-            self.current_belief = torch.zeros(
-                (1, self.num_classes), 
-                device=self.device
-            )
+            if DEBUG: print(f"\n🎬 === NEW VIDEO: {current_vid_id} ===")
             
-            # Set Index 0 (Terminal Ileum) to 1.0 (100% Probability)
-            self.current_belief[:, 0] = 1.0
+            self.last_video_id = current_vid_id # Update tracker
             
+            # RESET BELIEF: Start with Terminal Ileum (Index 0)
+            self.current_belief = torch.zeros((1, self.num_classes), device=self.device)
+            self.current_belief[:, 0] = 1.0 # Force start at Ileum
+            
+            # Debug: Verify Reset
+            if DEBUG: print(f"  [Reset] Belief forced to Class 0 (Ileum)")
+
         # --- 2. Forward Pass using SELF-GENERATED Belief ---
-        # Note: We use self.current_belief, NOT the ground truth from the batch
+        # We track what we are feeding IN
+        input_belief_idx = torch.argmax(self.current_belief, dim=1).item()
+        
         outputs = self(video_clip, self.current_belief)
         
         # --- 3. Update Belief for NEXT Step ---
-        # We take the posterior (Logits) -> Softmax -> Store as next input
-        # Detach is crucial to stop gradients (though in val it doesn't matter much)
-        self.current_belief = F.softmax(outputs["posterior"], dim=1).detach()
-        if self.config.get("use_noise", True):
-            pred_idx = torch.argmax(self.current_belief, dim=1) 
+        # Get raw probabilities (Softmax of Posterior)
+        probs = F.softmax(outputs["posterior"], dim=1)
+        pred_idx = torch.argmax(probs, dim=1) 
+        
+        # Prepare next input (Hard Argmax for next step)
+        next_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
+        
+        # --- DEBUGGING BLOCK ---
+        if DEBUG:
+            # Classes map (shortened for display)
+            # 0:Ileum, 1:Cecum, 2:Asc, 3:Hep, 4:Trans, 5:Spl, 6:Des, 7:Sig, 8:Rect, 9:Anal
             
-            # 2. Convert to One-Hot (Same format as Ground Truth in training)
-            self.current_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
+            # 1. Vision Opinion (Likelihood)
+            # Check what the image ALONE thinks (argmax of likelihood)
+            vis_logits = outputs["likelihood"] # LogProbs or Logits
+            vis_pred = torch.argmax(vis_logits, dim=1).item()
+            vis_conf = torch.max(F.softmax(vis_logits, dim=1)).item()
+            
+            # 2. Motion Opinion (Prior)
+            # Check what the previous state thought (argmax of prior)
+            mot_logits = outputs["prior"]
+            mot_pred = torch.argmax(mot_logits, dim=1).item()
+            
+            # 3. Final Decision
+            final_pred = pred_idx.item()
+            final_conf = torch.max(probs).item()
+
+            print(f"Frame {batch_idx:04d} | "
+                  f"GT: {current_gt} | "
+                  f"In: {input_belief_idx} -> "
+                  f"Vis: {vis_pred} ({vis_conf:.2f}) + Mot: {mot_pred} "
+                  f"=> Out: {final_pred} ({final_conf:.2f}) "
+                  f"{'✅' if final_pred == current_gt else '❌'}")
+
+            # Safety Check: Is Vision seeing garbage?
+            if vis_conf < 0.15: 
+                print(f"    ⚠️ LOW VISION CONFIDENCE! Input Range: {video_clip.min():.1f} to {video_clip.max():.1f}")
+
+        # Update state for next loop
+        self.current_belief = next_belief.detach()
+
         # --- 4. Metrics ---
         val_loss = self.criterion(outputs["posterior"], current_label)
         self.val_acc(outputs["posterior"], current_label)
         self.val_f1(outputs["posterior"], current_label)
         
-        self.log('val_loss', val_loss, on_epoch=True, prog_bar=True)
-        self.log('val_acc', self.val_acc, on_epoch=True, prog_bar=True)
-        self.log('val_f1', self.val_f1, on_epoch=True, prog_bar=True)
+        self.log('val_loss', val_loss, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log('val_acc', self.val_acc, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log('val_f1', self.val_f1, on_epoch=True, prog_bar=True, batch_size=1)
         
         return val_loss
+
+    # def validation_step(self, batch, batch_idx):
+    #     """
+    #     True Self-Forcing Validation.
+    #     Batch Size MUST be 1. Shuffle MUST be False.
+    #     """
+    #     video_clip, current_label, _, video_id = batch 
+        
+    #     # Unpack list (because batch_size=1 wraps strings in a tuple)
+    #     # video_id comes out as ('Video_01',)
+    #     current_vid_id = video_id[0] 
+        
+    #     # --- 1. State Management ---
+    #     # If this is a new video, or the very first batch
+    #     if current_vid_id != self.last_video_id:
+    #         # RESET BELIEF: Start with Uniform Distribution (We know nothing)
+    #         self.current_belief = torch.zeros(
+    #             (1, self.num_classes), 
+    #             device=self.device
+    #         )
+            
+    #         # Set Index 0 (Terminal Ileum) to 1.0 (100% Probability)
+    #         self.current_belief[:, 0] = 1.0
+            
+    #     # --- 2. Forward Pass using SELF-GENERATED Belief ---
+    #     # Note: We use self.current_belief, NOT the ground truth from the batch
+    #     outputs = self(video_clip, self.current_belief)
+        
+    #     # --- 3. Update Belief for NEXT Step ---
+    #     # We take the posterior (Logits) -> Softmax -> Store as next input
+    #     # Detach is crucial to stop gradients (though in val it doesn't matter much)
+    #     self.current_belief = F.softmax(outputs["posterior"], dim=1).detach()
+    #     if self.config.get("use_noise", True):
+    #         pred_idx = torch.argmax(self.current_belief, dim=1) 
+            
+    #         # 2. Convert to One-Hot (Same format as Ground Truth in training)
+    #         self.current_belief = F.one_hot(pred_idx, num_classes=self.num_classes).float()
+    #     # --- 4. Metrics ---
+    #     val_loss = self.criterion(outputs["posterior"], current_label)
+    #     self.val_acc(outputs["posterior"], current_label)
+    #     self.val_f1(outputs["posterior"], current_label)
+        
+    #     self.log('val_loss', val_loss, on_epoch=True, prog_bar=True)
+    #     self.log('val_acc', self.val_acc, on_epoch=True, prog_bar=True)
+    #     self.log('val_f1', self.val_f1, on_epoch=True, prog_bar=True)
+        
+    #     return val_loss
 
     def configure_optimizers(self):
         """
