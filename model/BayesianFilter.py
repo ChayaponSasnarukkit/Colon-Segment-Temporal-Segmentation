@@ -129,12 +129,12 @@ class GatedFusionBayesianNeuralFilter_Implicit(nn.Module):
         # --- Motion Expert (Prior) ---
         # "Evolve the previous state using motion info"
         prior_latent = self.motion_fusion(h_old=prev_emb, x_input=motion_feat)
-        prior_logits = self.prior_head(prior_latent)
+        prior_logits = F.log_softmax(self.prior_head(prior_latent))
         
         # --- Vision Expert (Likelihood) ---
         # "Look at the image, but use the previous state to resolve ambiguity"
         vision_latent = self.vision_fusion(x_feat=vision_feat, context=prev_emb)
-        likelihood_logits = self.vision_head(vision_latent)
+        likelihood_logits = F.log_softmax(self.vision_head(vision_latent))
         
         # --- Bayesian Update ---
         posterior_logits = prior_logits + likelihood_logits
@@ -240,7 +240,7 @@ class GatedFusionBayesianNeuralFilter_Explicit(nn.Module):
         
         # 4. Vision Expert (Likelihood)
         vision_latent = self.vision_fusion(x_feat=vision_feat, context=prev_emb)
-        likelihood_logits = self.vision_head(vision_latent)
+        likelihood_logits = F.log_softmax(self.vision_head(vision_latent))
         
         # 5. Bayesian Fusion (Log Space)
         posterior_logits = prior_logits + likelihood_logits
@@ -291,9 +291,8 @@ class BayesianNeuralFilter_Explicit(nn.Module):
         # We add epsilon to prevent log(0)
         epsilon = 1e-9
         prior_logits = torch.log(prior_prob + epsilon)
-        
         # 4. Vision Expert (Likelihood)
-        likelihood_logits = self.vision_head(vision_feat)
+        likelihood_logits = F.log_softmax(self.vision_head(vision_feat))
         
         # 5. Bayesian Fusion (Log Space)
         posterior_logits = prior_logits + likelihood_logits
