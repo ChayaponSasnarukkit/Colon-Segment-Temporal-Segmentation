@@ -50,7 +50,8 @@ CONFIG = {
     "use_noise": True,
     "confidence_scale": 3.5,
     "noise_level": 1.0,
-    "warmup": 0.1
+    "warmup": 0.1,
+    "debug_mode": True
 }
 
 # ==========================================
@@ -165,6 +166,7 @@ def main():
         all_samples=len(train_dataset)
     )
 
+    trainer.validate(model=model, dataloaders=val_loader)
     # --- 4. Start Training ---
     print("🔥 Start Training Loop")
     trainer.fit(lightning_module, train_loader, val_loader)

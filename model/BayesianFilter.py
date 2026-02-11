@@ -411,7 +411,7 @@ class PLWrapper(L.LightningModule):
         
         # --- DEBUG INIT ---
         # Toggle this flag manually or via config
-        DEBUG = self.config.get("debug_mode", False) and batch_idx < 50 # Limit to first 50 frames to avoid spam
+        DEBUG = self.config.get("debug_mode", False) and batch_idx < 500 # Limit to first 50 frames to avoid spam
         
         # --- 1. State Management ---
         # If this is a new video
