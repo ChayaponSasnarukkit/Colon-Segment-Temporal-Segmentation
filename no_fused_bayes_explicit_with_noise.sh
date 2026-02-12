@@ -34,7 +34,7 @@ export LD_LIBRARY_PATH=$TORCH_LIB:/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12
 # We explicitly exclude libtorch_python.so to avoid the symbol error.
 export LD_PRELOAD=$TORCH_LIB/libc10.so:$TORCH_LIB/libtorch.so:$TORCH_LIB/libtorch_cuda.so
 # 4. Run the training (Pass all variables)
-srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python simple_bayes_explicit_with_noise.py
+srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python no_fused_bayes_explicit_with_noise.py
 
 
 # 1. Force the physical path to the libraries (use /lustrefs, NOT /home)

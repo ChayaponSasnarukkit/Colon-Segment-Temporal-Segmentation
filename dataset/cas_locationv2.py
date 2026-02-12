@@ -334,7 +334,7 @@ class CasColonDataset(Dataset):
                 current_vid_samples.append(sample)
 
                 if self.mode == "train" and self.oversampling==True and label != prev_label:
-                    dynamic_count = expected_count // (len(self.classes) * 2)
+                    dynamic_count = expected_count // (len(self.classes) * self.transition_factor)
                     oversample_count = max(dynamic_count, 5)
                     new_expected_count += oversample_count
                     for _ in range(oversample_count):

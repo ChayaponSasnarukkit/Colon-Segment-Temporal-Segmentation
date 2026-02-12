@@ -33,8 +33,8 @@ CONFIG = {
     
     # Training Hyperparams
     "batch_size": 16,         # Adjust based on GPU VRAM
-    "epochs": 20,
-    "lr": 2e-4,              # Learning rate for Head/Filter
+    "epochs": 5,
+    "lr": 1e-4,              # Learning rate for Head/Filter
     "weight_decay": 1e-4,
     "grad_accum_steps": 4,
     "num_workers": 8,
@@ -166,7 +166,7 @@ def main():
         all_samples=len(train_dataset)
     )
 
-    trainer.validate(model=model, dataloaders=val_loader)
+    trainer.validate(model=lightning_module, dataloaders=val_loader)
     # --- 4. Start Training ---
     print("🔥 Start Training Loop")
     trainer.fit(lightning_module, train_loader, val_loader)

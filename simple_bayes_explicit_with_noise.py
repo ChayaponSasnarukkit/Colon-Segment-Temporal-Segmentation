@@ -71,7 +71,9 @@ def main():
         sampling_rate=CONFIG["sampling_rate"],
         stride=CONFIG["stride"],
         mode="train",
-        crop_size=CONFIG["crop_size"]
+        crop_size=CONFIG["crop_size"],
+        transition_factor=1,
+        oversampling=True
     )
     
     train_loader = DataLoader(
@@ -131,7 +133,7 @@ def main():
     
     
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/noisyexplicit_bayes2",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/noisyexplicit_bayes12",
         filename='{epoch:02d}',
         save_top_k=10,
         monitor='train_loss',
@@ -142,7 +144,7 @@ def main():
 
     logger = TensorBoardLogger(
         save_dir='./tb_log', 
-        version='noisyexplicit_bayes2'
+        version='noisyexplicit_bayes12'
     )
 
     trainer = L.Trainer(

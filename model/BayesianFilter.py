@@ -470,7 +470,7 @@ class PLWrapper(L.LightningModule):
 
             # Safety Check: Is Vision seeing garbage?
             if vis_conf < 0.15: 
-                print(f"    ⚠️ LOW VISION CONFIDENCE! Input Range: {video_clip.min():.1f} to {video_clip.max():.1f}")
+                print(f"    ⚠️ LOW VISION CONFIDENCE! Input Range: {video_clip.min():.1f} to {video_clip.max():.1f} with average of {video_clip.mean():.1f}")
 
         # Update state for next loop
         self.current_belief = next_belief.detach()
