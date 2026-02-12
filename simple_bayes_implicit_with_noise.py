@@ -43,12 +43,12 @@ CONFIG = {
     
     # Dataset Params
     "clip_len": 20,
-    "sampling_rate": 6,
+    "sampling_rate": 3,
     "stride": 60,
     "crop_size": 224,
 
     "use_noise": True,
-    "confidence_scale": 2.0,
+    "confidence_scale": 3.0,
     "noise_level": 1.0,
 
 }
@@ -72,7 +72,7 @@ def main():
         stride=CONFIG["stride"],
         mode="train",
         crop_size=CONFIG["crop_size"],
-        transition_factor=1,
+        transition_factor=0.5,
         oversampling=True
     )
     

@@ -106,6 +106,8 @@ class GatedFusionBayesianNeuralFilter_Implicit(nn.Module):
             nn.Linear(state_dim, num_classes)
         )
 
+        self.prior_scale = nn.Parameter(torch.tensor(0.1))
+
     def forward(self, x_clip, prev_state):
         """
         Args:
@@ -137,7 +139,7 @@ class GatedFusionBayesianNeuralFilter_Implicit(nn.Module):
         likelihood_logits = F.log_softmax(self.vision_head(vision_latent))
         
         # --- Bayesian Update ---
-        posterior_logits = prior_logits + likelihood_logits
+        posterior_logits = (prior_logits * self.prior_scale) + likelihood_logits
         
         return {
             "posterior": posterior_logits,
