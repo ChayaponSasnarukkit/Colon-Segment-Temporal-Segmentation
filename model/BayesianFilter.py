@@ -270,6 +270,8 @@ class BayesianNeuralFilter_Explicit(nn.Module):
             nn.Linear(state_dim, num_classes)
         )
 
+        self.prior_scale = nn.Parameter(torch.tensor(0.1))
+
     def forward(self, x_clip, prev_state_input):
         # 1. Handle Input (Indices vs Probs)
         if prev_state_input.dim() == 1 and prev_state_input.dtype == torch.long:
@@ -295,7 +297,8 @@ class BayesianNeuralFilter_Explicit(nn.Module):
         likelihood_logits = F.log_softmax(self.vision_head(vision_feat))
         
         # 5. Bayesian Fusion (Log Space)
-        posterior_logits = prior_logits + likelihood_logits
+        # posterior_logits = prior_logits + likelihood_logits
+        posterior_logits = (prior_logits * self.prior_scale) + likelihood_logits
         
         return {
             "posterior": posterior_logits,
@@ -326,6 +329,8 @@ class PLWrapper(L.LightningModule):
         self.save_hyperparameters(ignore=['model'])
         self.config = config
         self.model = model
+        for param in self.model.parameters():
+            param.requires_grad = True
         self.num_classes = self.config["num_classes"]
         
         # Loss
@@ -354,32 +359,35 @@ class PLWrapper(L.LightningModule):
 
         # --- 2. Add Random Noise & Softmax ---
         # use_noise = getattr(self, "use_input_noise", True)
-        
-        if self.config.get("use_noise", True):
-            # A. Create Random Noise (Gaussian/Normal distribution)
-            # This creates values like [-0.5, 0.2, 1.1, -0.1...]
+        if torch.rand(1).item() < 0.25:
             noise = torch.randn_like(one_hot_gt, device=self.device)
-            
-            # B. Define "Confidence" vs "Noise" strength
-            # High 'confidence_scale' (e.g., 10.0) ensures the GT remains the Argmax.
-            # 'noise_level' controls how messy the other classes look.
-            confidence_scale = self.config.get("confidence_scale", 3.5) 
-            noise_level = self.config.get("noise_level", 1.0)  
-
-            # C. Create "Noisy Logits"
-            # We multiply the One-Hot by a large number so the correct class 
-            # has a much higher logit than the others (e.g., 10.0 vs 0.0).
-            # Then we add the random noise.
-            noisy_logits = (one_hot_gt * confidence_scale) + (noise * noise_level)
-            
-            # D. Apply Softmax (User Request)
-            # This squashes logits into a valid probability distribution (Sum = 1.0).
-            # The GT will likely be ~0.90, and others will be ~0.01, ~0.03, etc.
-            prev_belief = F.softmax(noisy_logits, dim=1)
-            
+            prev_belief = F.softmax(noise, dim=1)
         else:
-            # Clean Teacher Forcing (Strict One-Hot)
-            prev_belief = one_hot_gt
+            if self.config.get("use_noise", True):
+                # A. Create Random Noise (Gaussian/Normal distribution)
+                # This creates values like [-0.5, 0.2, 1.1, -0.1...]
+                noise = torch.randn_like(one_hot_gt, device=self.device)
+                
+                # B. Define "Confidence" vs "Noise" strength
+                # High 'confidence_scale' (e.g., 10.0) ensures the GT remains the Argmax.
+                # 'noise_level' controls how messy the other classes look.
+                confidence_scale = self.config.get("confidence_scale", 3.5) 
+                noise_level = self.config.get("noise_level", 1.0)  
+
+                # C. Create "Noisy Logits"
+                # We multiply the One-Hot by a large number so the correct class 
+                # has a much higher logit than the others (e.g., 10.0 vs 0.0).
+                # Then we add the random noise.
+                noisy_logits = (one_hot_gt * confidence_scale) + (noise * noise_level)
+                
+                # D. Apply Softmax (User Request)
+                # This squashes logits into a valid probability distribution (Sum = 1.0).
+                # The GT will likely be ~0.90, and others will be ~0.01, ~0.03, etc.
+                prev_belief = F.softmax(noisy_logits, dim=1)
+                
+            else:
+                # Clean Teacher Forcing (Strict One-Hot)
+                prev_belief = one_hot_gt
 
         outputs = self(video_clip, prev_belief)
         
