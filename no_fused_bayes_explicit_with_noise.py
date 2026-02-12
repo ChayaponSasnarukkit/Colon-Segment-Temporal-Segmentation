@@ -72,7 +72,9 @@ def main():
         sampling_rate=CONFIG["sampling_rate"],
         stride=CONFIG["stride"],
         mode="train",
-        crop_size=CONFIG["crop_size"]
+        crop_size=CONFIG["crop_size"],
+        transition_factor=0.75,
+        oversampling=True
     )
     
     train_loader = DataLoader(

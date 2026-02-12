@@ -359,9 +359,12 @@ class PLWrapper(L.LightningModule):
 
         # --- 2. Add Random Noise & Softmax ---
         # use_noise = getattr(self, "use_input_noise", True)
-        if torch.rand(1).item() < 0.25:
-            noise = torch.randn_like(one_hot_gt, device=self.device)
-            prev_belief = F.softmax(noise, dim=1)
+        will_drop = torch.rand(1).item() < 0.25
+        if will_drop:
+            #noise = torch.randn_like(one_hot_gt, device=self.device)
+            #prev_belief = F.softmax(noise, dim=1)
+            fake_indices = torch.randint(0, self.num_classes, prev_label_gt.shape, device=self.device)
+            prev_belief = F.one_hot(fake_indices, num_classes=self.num_classes).float()
         else:
             if self.config.get("use_noise", True):
                 # A. Create Random Noise (Gaussian/Normal distribution)
@@ -396,8 +399,11 @@ class PLWrapper(L.LightningModule):
         loss_prior = self.criterion(outputs["prior"], current_label)
         loss_like = self.criterion(outputs["likelihood"], current_label)
         
-        total_loss = loss_post + 0.5 * loss_prior + 0.25 * loss_like
-        
+        if will_drop:
+            total_loss = loss_post + 0.5 * loss_prior + 0.5 * loss_like
+        else:
+            total_loss = loss_post + 0.5 * loss_like
+
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
 
