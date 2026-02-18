@@ -50,6 +50,7 @@ CONFIG = {
     "use_noise": True,
     "confidence_scale": 3.0,
     "noise_level": 1.0,
+    "debug_mode": True,
 
 }
 

@@ -131,7 +131,7 @@ class GatedFusionBayesianNeuralFilter_Implicit(nn.Module):
         # --- Motion Expert (Prior) ---
         # "Evolve the previous state using motion info"
         prior_latent = self.motion_fusion(h_old=prev_emb, x_input=motion_feat)
-        prior_logits = F.log_softmax(self.prior_head(prior_latent))
+        prior_logits = F.log_softmax(self.prior_head(prior_latent)) # num_class logits vector
         
         # --- Vision Expert (Likelihood) ---
         # "Look at the image, but use the previous state to resolve ambiguity"
