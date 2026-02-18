@@ -10,7 +10,7 @@ from decord import VideoReader, cpu
 # --- Configuration ---
 VIDEO_DIR = "/scratch/lt200353-pcllm/location/cas_colon/"
 OUTPUT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3"
-BATCH_SIZE = 32                  
+BATCH_SIZE = 512                  
 NUM_WORKERS = 8
 TARGET_FPS = 60
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
