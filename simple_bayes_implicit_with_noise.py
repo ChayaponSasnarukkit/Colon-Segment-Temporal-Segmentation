@@ -32,9 +32,9 @@ CONFIG = {
     "state_dim": 384,        # Hidden state for Bayesian Filter
     
     # Training Hyperparams
-    "batch_size": 16,         # Adjust based on GPU VRAM
-    "epochs": 20,
-    "lr": 2e-4,              # Learning rate for Head/Filter
+    "batch_size": 8,         # Adjust based on GPU VRAM
+    "epochs": 10,
+    "lr": 1e-4,              # Learning rate for Head/Filter
     "weight_decay": 1e-4,
     "grad_accum_steps": 4,
     "num_workers": 8,
@@ -42,8 +42,8 @@ CONFIG = {
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     
     # Dataset Params
-    "clip_len": 20,
-    "sampling_rate": 3,
+    "clip_len": 30,
+    "sampling_rate": 2,
     "stride": 60,
     "crop_size": 224,
 
@@ -96,7 +96,8 @@ def main():
         sampling_rate=CONFIG["sampling_rate"],
         stride=CONFIG["stride"],
         mode="test",  # Use 'test' or 'val' to trigger deterministic transforms
-        crop_size=CONFIG["crop_size"]
+        crop_size=CONFIG["crop_size"],
+
     )
     
     val_loader = DataLoader(
@@ -134,7 +135,7 @@ def main():
     
     
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/2noisyimplicit_bayes",
+        dirpath="/scratch/lt200353-pcllm/location/checkpoints/1a2noisyimplicit_bayes",
         filename='{epoch:02d}',
         save_top_k=10,
         monitor='train_loss',
@@ -145,7 +146,7 @@ def main():
 
     logger = TensorBoardLogger(
         save_dir='./tb_log', 
-        version='2noisyimplicit_bayes'
+        version='1a2noisyimplicit_bayes'
     )
 
     trainer = L.Trainer(
