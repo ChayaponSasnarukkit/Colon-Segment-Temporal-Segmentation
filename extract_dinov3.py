@@ -1,125 +1,130 @@
 import torch
 import torch.nn as nn
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoModel
 import numpy as np
 import os
 import glob
 from tqdm import tqdm
-from decord import VideoReader, cpu
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
 
 # --- Configuration ---
-VIDEO_DIR = "/scratch/lt200353-pcllm/location/cas_colon/"
+# Point this to the parent directory containing the folders of images
+# e.g., if images are in .../cas_colon/1/*.jpg, point to .../cas_colon/
+IMAGE_ROOT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/" 
 OUTPUT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3"
-BATCH_SIZE = 512                  
-NUM_WORKERS = 8
-TARGET_FPS = 60
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Choose Model Variant:
-# - Base:  "facebook/dinov3-vitb16-pretrain-lvd1689m"
-# - Large: "facebook/dinov3-vitl16-pretrain-lvd1689m" (Recommended)
-# - Huge:  "facebook/dinov3-vith16-pretrain-lvd1689m"
+BATCH_SIZE = 512
+NUM_WORKERS = 8  # This is the key to speedup
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_ID = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 
-# --- 1. Define the Backbone (DINOv3) ---
+# --- 1. Define Dataset ---
+class VideoFrameDataset(Dataset):
+    def __init__(self, image_paths, transform=None):
+        self.image_paths = image_paths
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        try:
+            image = Image.open(img_path).convert("RGB")
+            if self.transform:
+                image = self.transform(image)
+            return image
+        except Exception as e:
+            print(f"Error loading {img_path}: {e}")
+            # Return a black image in case of error to keep batch consistent
+            return torch.zeros((3, 224, 224))
+
+# --- 2. Define Backbone ---
 class DINOv3FeatureExtractor(nn.Module):
     def __init__(self, model_id):
-        super(DINOv3FeatureExtractor, self).__init__()
+        super().__init__()
         print(f"Loading DINOv3 model: {model_id} ...")
-        
-        # Load Model from Hugging Face
         self.model = AutoModel.from_pretrained(model_id)
-        
-        # Load Processor (Handles Resize, Norm, etc.)
-        self.processor = AutoImageProcessor.from_pretrained(model_id)
-        
-        # Freeze model
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad = False
 
     def forward(self, pixel_values):
-        # pixel_values: (B, 3, H, W)
         outputs = self.model(pixel_values=pixel_values)
-        
-        # DINOv3 Output: last_hidden_state is (B, SeqLen, HiddenDim)
-        # Index 0 is the CLS token (Global Representation)
-        last_hidden_state = outputs.last_hidden_state
-        cls_token = last_hidden_state[:, 0, :] # (B, HiddenDim)
-        
-        return cls_token
+        # Take CLS token
+        return outputs.last_hidden_state[:, 0, :]
 
-# --- 2. Main Extraction Loop ---
+def get_transform():
+    # Replicates DINOv3 preprocessing using fast Torchvision transforms
+    # Mean/Std for ImageNet (standard for ViTs)
+    return transforms.Compose([
+        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+# --- 3. Main Loop ---
 def main():
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
 
-    # 1. Setup Model
+    # A. Setup Model
     extractor = DINOv3FeatureExtractor(MODEL_ID).to(DEVICE)
-    extractor.eval()
     
-    # Get the processor for manual usage in the loop
-    processor = extractor.processor
+    # Use torchvision transforms (faster than HF processor)
+    transform = get_transform()
 
-    # 2. Find Videos
-    video_files = glob.glob(os.path.join(VIDEO_DIR, "*.mp4"))
-    print(f"Found {len(video_files)} videos. Starting DINOv3 extraction...")
+    # B. Find Image Directories
+    # Assuming structure: root_dir/video_name/*.jpg
+    # We look for subdirectories in the root folder
+    subdirs = [d for d in os.listdir(IMAGE_ROOT_DIR) if os.path.isdir(os.path.join(IMAGE_ROOT_DIR, d))]
+    subdirs.sort()
+    
+    print(f"Found {len(subdirs)} folders (potential videos). Starting extraction...")
 
-    # 3. Process Each Video
-    for vid_path in tqdm(video_files):
-        video_name = os.path.splitext(os.path.basename(vid_path))[0]
+    for video_name in tqdm(subdirs):
+        video_dir = os.path.join(IMAGE_ROOT_DIR, video_name)
         out_path = os.path.join(OUTPUT_DIR, f"{video_name}.npy")
-        
+
         if os.path.exists(out_path):
             continue
 
-        try:
-            # A. Read Video
-            vr = VideoReader(vid_path, ctx=cpu(0))
-            total_frames = len(vr)
-            fps = vr.get_avg_fps()
+        # C. Gather and Sort Images
+        # Filter for jpg/png and SORT them to ensure temporal order
+        image_files = sorted(glob.glob(os.path.join(video_dir, "*.jpg")))
+        
+        if len(image_files) == 0:
+            continue
 
-            # B. Calculate Indices
-            step = max(1, int(round(fps / TARGET_FPS)))
-            indices = list(range(0, total_frames, step))
+        # D. Create Loader with Workers
+        # pin_memory=True speeds up transfer from CPU RAM to GPU RAM
+        dataset = VideoFrameDataset(image_files, transform=transform)
+        loader = DataLoader(
+            dataset, 
+            batch_size=BATCH_SIZE, 
+            num_workers=NUM_WORKERS, 
+            shuffle=False, 
+            pin_memory=True,
+            prefetch_factor=2 # Pre-loads 2 batches per worker
+        )
 
-            video_feats = []
+        video_feats = []
 
-            # C. Batch Processing
-            for i in tqdm(range(0, len(indices), BATCH_SIZE)):
-                batch_indices = indices[i : i + BATCH_SIZE]
+        # E. Inference
+        with torch.no_grad():
+            for batch_imgs in tqdm(loader):
+                batch_imgs = batch_imgs.to(DEVICE, non_blocking=True)
                 
-                # Get raw frames (B, H, W, C) - uint8
-                raw_frames = vr.get_batch(batch_indices).asnumpy()
-                
-                # Convert to list of arrays for the processor
-                list_frames = [raw_frames[j] for j in range(len(raw_frames))]
+                # (B, HiddenDim)
+                feats = extractor(batch_imgs)
+                video_feats.append(feats.cpu().numpy())
 
-                # D. Preprocess with Hugging Face Processor
-                # DINOv3 uses 224x224 by default usually, but we enforce it here for consistency.
-                inputs = processor(
-                    images=list_frames, 
-                    return_tensors="pt", 
-                    do_resize=True, 
-                    size={"height": 224, "width": 224} 
-                )
-                
-                pixel_values = inputs["pixel_values"].to(DEVICE)
-
-                # E. Inference
-                with torch.no_grad():
-                    # (B, HiddenDim)
-                    feats = extractor(pixel_values)
-                    video_feats.append(feats.cpu().numpy())
-
-            # F. Save
-            if len(video_feats) > 0:
-                full_video_feats = np.concatenate(video_feats, axis=0)
-                # Save as (T, Feature_Dim) -> e.g. (T, 1024)
-                np.save(out_path, full_video_feats) 
-
-        except Exception as e:
-            print(f"Error on {video_name}: {e}")
+        # F. Save Results
+        if len(video_feats) > 0:
+            full_video_feats = np.concatenate(video_feats, axis=0)
+            np.save(out_path, full_video_feats)
 
 if __name__ == "__main__":
     main()
