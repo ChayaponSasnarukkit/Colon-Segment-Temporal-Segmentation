@@ -132,17 +132,27 @@ class MambaTBPTT(Mamba):
             # next_conv_state = x[..., -(self.d_conv - 1):].clone() if self.d_conv > 1 else None
 
             if pass_conv_state is not None:
-                # x_padded = torch.cat([pass_conv_state, x], dim=-1)
-                if causal_conv1d_fn is not None:
-                    # Use the ultra-fast fused kernel from causal-conv1d >= 1.4.0
-                    x, next_conv_state = causal_conv1d_fn(
-                        x=x,
+                #if causal_conv1d_fn is not None:
+                if False:
+                    x_cl = x.permute(0, 2, 1).clone().permute(0, 2, 1)
+                    state_cl = pass_conv_state.permute(0, 2, 1).clone().permute(0, 2, 1)
+
+                    # 2. Extract next_conv_state and immediately force it into channel-last layout
+                    if self.d_conv > 1:
+                        sliced_state = x[..., -(self.d_conv - 1):]
+                        next_conv_state = sliced_state.transpose(1, 2).contiguous().transpose(1, 2)
+                    else:
+                        next_conv_state = None
+                    print(x_cl.shape, state_cl.shape)
+                    x = causal_conv1d_fn(
+                        x=x_cl,
                         weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                         bias=self.conv1d.bias,
-                        initial_states=pass_conv_state,
-                        return_final_states=True,
+                        initial_states=state_cl,
+                        return_final_states=False,
                         activation=self.activation,
                     )
+                    # x = x_cl.transpose(1, 2).contiguous()
                 else:
                     # Native PyTorch fallback (Strictly causal via manual padding)
                     next_conv_state = x[..., -(self.d_conv - 1):].clone() if self.d_conv > 1 else None
@@ -161,6 +171,7 @@ class MambaTBPTT(Mamba):
                         
                     x = self.act(x_conv)
             else:
+                next_conv_state = x[..., -(self.d_conv - 1):].clone() if self.d_conv > 1 else None
                 if causal_conv1d_fn is None:
                     x = self.act(self.conv1d(x)[..., :seqlen])
                 else:
@@ -510,7 +521,7 @@ class MixerModel(nn.Module):
 from collections import namedtuple
 
 class MambaTemporalSegmentation(nn.Module):
-    def __init__(self, config, vision_dim: int, num_classes: int, device=None, dtype=None):
+    def __init__(self, config, vision_dim: int, num_classes: int, device=None, dtype=None, loss_fn=None):
         super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
         
@@ -528,6 +539,10 @@ class MambaTemporalSegmentation(nn.Module):
         
         # Classification head (per-frame prediction)
         self.classifier = nn.Linear(config.d_model, num_classes, bias=False, **factory_kwargs)
+        if loss_fn:
+            self.loss_fn = loss_fn
+        else:
+            self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     def forward(self, vision_embeddings, pass_states=None, labels=None):
         # 1. Forward through backbone
@@ -539,9 +554,8 @@ class MambaTemporalSegmentation(nn.Module):
         # 3. Compute per-frame Loss
         loss = None
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             # Flatten to (B * L, num_classes) and (B * L)
-            loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+            loss = self.loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
 
         Output = namedtuple("Output", ["loss", "logits", "next_states"])
         return Output(loss=loss, logits=logits, next_states=new_states)

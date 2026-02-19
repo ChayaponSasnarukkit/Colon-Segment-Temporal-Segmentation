@@ -15,8 +15,8 @@ class MambaTemporalConfig:
         "expand": 2,             # Internal feature expansion factor
         "dt_rank": "auto",       # Will default to math.ceil(d_model / 16)
         "layer": "Mamba1",       # Mamba1 is heavily tested for TBPTT. Switch to Mamba2 if you need extreme speed.
-    })
-    
+        "use_fast_path": False,
+    }) 
     # --- Hardware & Stability ---
     rms_norm: bool = True        # Faster than standard LayerNorm
     norm_epsilon: float = 1e-5
@@ -27,19 +27,21 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import os
-
+from tqdm import tqdm
 def train_one_epoch(model, dataloader, optimizer, device):
     model.train()
     total_loss = 0.0
     steps = 0
     current_states = None 
-    
-    for step, (vision_embeddings, reset_mask, labels) in enumerate(dataloader):
+    # final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id
+    for step, (vision_embeddings, _, labels, reset_mask, _, _) in enumerate(tqdm(dataloader)):
         vision_embeddings = vision_embeddings.to(device)
         labels = labels.to(device)
+        reset_mask = reset_mask.to(device)
         
         # Wipe states if a new video starts
         if reset_mask.any() and current_states is not None:
+            print(reset_mask)
             current_states = apply_reset_mask(current_states, reset_mask)
 
         optimizer.zero_grad()
@@ -61,11 +63,11 @@ def train_one_epoch(model, dataloader, optimizer, device):
         total_loss += outputs.loss.item()
         steps += 1
         
-        if step % 50 == 0:
+        if step % 5 == 0:
             print(f"  [Train] Step {step} | Loss: {outputs.loss.item():.4f}")
             
     return total_loss / (steps if steps > 0 else 1)
-
+import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score
 
@@ -80,9 +82,10 @@ def validate(model, dataloader, device, ignore_index=-100):
     all_labels = []
     
     with torch.no_grad():
-        for step, (vision_embeddings, reset_mask, labels) in enumerate(dataloader):
+        for step, (vision_embeddings, _, labels, reset_mask, _, _) in enumerate(dataloader):
             vision_embeddings = vision_embeddings.to(device)
             labels = labels.to(device)
+            reset_mask = reset_mask.to(device)
             
             if reset_mask.any() and current_states is not None:
                 current_states = apply_reset_mask(current_states, reset_mask)
@@ -125,13 +128,95 @@ def validate(model, dataloader, device, ignore_index=-100):
     f1_per_class = f1_score(all_labels, all_preds, average=None, zero_division=0)
             
     return val_loss, acc, f1_macro, f1_per_class
+NUM_CLASSES = len(CLASS_MAP)
+def parse_intervals(time_str):
+    intervals = []
+    if pd.isna(time_str) or str(time_str).strip() in ['', '-', 'nan']: return []
+    segments = str(time_str).split('/')
+    for seg in segments:
+        try:
+            if '-' not in seg: continue
+            s, e = seg.strip().split('-')
+            def to_s(x): return int(x.split(':')[0])*60 + int(x.split(':')[1])
+            intervals.append((to_s(s), to_s(e)))
+        except: pass
+    return intervals
 
+def compute_class_weights(csv_path, fps=60):
+    """
+    Parses the dataset CSV to compute inverse frequency class weights 
+    for Weighted Cross-Entropy Loss.
+    """
+    df = pd.read_csv(csv_path)
+    class_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+    
+    # 1. Accumulate frame counts for each class
+    for _, row in df.iterrows():
+        for cls_name, cls_idx in CLASS_MAP.items():
+            if cls_name not in row: 
+                continue
+                
+            intervals = parse_intervals(row[cls_name])
+            for (s, e) in intervals:
+                start_f = int(s * fps)
+                end_f = int(e * fps)
+                # Adding +1 to match your build_dense_label logic: [start_f:end_f+1]
+                frame_count = max(0, (end_f - start_f) + 1)
+                class_counts[cls_idx] += frame_count
+
+    # 2. Compute the total number of annotated frames
+    total_annotated_frames = np.sum(class_counts)
+    
+    # 3. Compute Inverse Frequency Weights
+    weights = np.zeros(NUM_CLASSES, dtype=np.float32)
+    for i in range(NUM_CLASSES):
+        if class_counts[i] > 0:
+            # Standard inverse frequency formula
+            weights[i] = total_annotated_frames / (NUM_CLASSES * class_counts[i])
+        else:
+            # Fallback if a class has absolutely 0 frames in the dataset
+            # Setting it to 0 means the network won't penalize it if it somehow guesses it
+            weights[i] = 0.0 
+            
+    print(f"Class Counts: {class_counts}")
+    print(f"Computed Weights: {weights}")
+    
+    # Return as a PyTorch Tensor
+    return torch.tensor(weights, dtype=torch.float32)
+
+# previous F1 score used as pseudo difficulty
+f1_scores = torch.tensor([
+    0.8577, # 0: Terminal_Ileum (Easy)
+    0.7468, # 1: Cecum
+    0.6207, # 2: Ascending_Colon
+    0.2579, # 3: Hepatic_Flexure (Hard)
+    0.6506, # 4: Transverse_Colon
+    0.0219, # 5: Splenic_Flexure (Very Hard)
+    0.4189, # 6: Descending_Colon
+    0.5832, # 7: Sigmoid_Colon
+    0.4574, # 8: Rectum
+    0.7186  # 9: Anal_Canal (Easy)
+])
+
+f1_based_weights = torch.tensor([
+    0.3050,  # 0: Terminal_Ileum (F1: 0.8577) -> Lowest weight
+    0.5426,  # 1: Cecum
+    0.8129,  # 2: Ascending_Colon
+    1.5903,  # 3: Hepatic_Flexure (F1: 0.2579) -> High weight
+    0.7488,  # 4: Transverse_Colon
+    2.0961,  # 5: Splenic_Flexure (F1: 0.0219) -> Highest weight
+    1.2453,  # 6: Descending_Colon
+    0.8932,  # 7: Sigmoid_Colon
+    1.1628,  # 8: Rectum
+    0.6030   # 9: Anal_Canal
+], dtype=torch.float32)
+from utils import FocalLoss
 def main():
     train_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         2, 
-        chunk_size=4096, 
+        chunk_size=2048, 
         
         # FPS Configuration
         fps=60,            # Source Video FPS
@@ -148,10 +233,10 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_val_split.csv", 
+        "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         2, 
-        chunk_size=4096, 
+        chunk_size=2048, 
         
         # FPS Configuration
         fps=60,            # Source Video FPS
@@ -167,16 +252,21 @@ def main():
         emb_dim=1024,
         transform=None)
     
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vision_feature_dim = 1024
     num_action_classes = len(CLASS_MAP)
-
+    #weight_tensor = compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device)
+    loss_fn=torch.nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)
+    #print(weight_tensor)
+    #class_weights = (1.0 - f1_scores) + 0.05
+    #loss_fn = FocalLoss(weight=class_weights.to(device), gamma=2.0, ignore_index=-100)
     config = MambaTemporalConfig(d_model=1024, n_layer=8)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MambaTemporalSegmentation(
         config=config, 
         vision_dim=vision_feature_dim, 
         num_classes=num_action_classes, 
         device=device, 
+        loss_fn=loss_fn
         # dtype=torch.bfloat16 # bfloat16 is highly recommended for Mamba training
     )
     # --- Training Configuration ---
@@ -184,7 +274,7 @@ def main():
     patience = 5  # How many epochs to wait for improvement before stopping
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = "./checkpoints"
+    save_dir = "./checkpoints/base_shuffle_focal"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 
@@ -194,7 +284,7 @@ def main():
     
     # Reduce learning rate by half if validation loss stops improving for 2 epochs
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+        optimizer, mode='min', factor=0.5, patience=2
     )
 
     # --- Main Training Loop ---
@@ -205,6 +295,7 @@ def main():
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
         # 1. Train
+        train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2)
         train_loss = train_one_epoch(model, train_loader, optimizer, device)
         
