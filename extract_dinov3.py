@@ -15,7 +15,7 @@ from PIL import Image
 IMAGE_ROOT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/" 
 OUTPUT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3"
 
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 NUM_WORKERS = 8  # This is the key to speedup
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_ID = "facebook/dinov3-vitl16-pretrain-lvd1689m"
@@ -79,11 +79,15 @@ def main():
     # B. Find Image Directories
     # Assuming structure: root_dir/video_name/*.jpg
     # We look for subdirectories in the root folder
-    subdirs = [d for d in os.listdir(IMAGE_ROOT_DIR) if os.path.isdir(os.path.join(IMAGE_ROOT_DIR, d))]
-    subdirs.sort()
+    subdirs = [
+        d for d in os.listdir(IMAGE_ROOT_DIR) 
+        if os.path.isdir(os.path.join(IMAGE_ROOT_DIR, d)) and d.isdigit()
+    ]
     
-    print(f"Found {len(subdirs)} folders (potential videos). Starting extraction...")
-
+    # Sort numerically (key=int) so "2" comes before "10"
+    subdirs.sort(key=int)
+    
+    print(f"Found {len(subdirs)} integer-named folders. Starting extraction...")
     for video_name in tqdm(subdirs):
         video_dir = os.path.join(IMAGE_ROOT_DIR, video_name)
         out_path = os.path.join(OUTPUT_DIR, f"{video_name}.npy")
@@ -115,16 +119,20 @@ def main():
         # E. Inference
         with torch.no_grad():
             for batch_imgs in tqdm(loader):
-                batch_imgs = batch_imgs.to(DEVICE, non_blocking=True)
+                batch_imgs = batch_imgs.to(DEVICE)
                 
                 # (B, HiddenDim)
                 feats = extractor(batch_imgs)
-                video_feats.append(feats.cpu().numpy())
+                video_feats.append(feats.cpu())
 
         # F. Save Results
         if len(video_feats) > 0:
-            full_video_feats = np.concatenate(video_feats, axis=0)
-            np.save(out_path, full_video_feats)
+            full_video_feats = torch.cat(video_feats, dim=0).float().cpu()
+            out_path_pt = os.path.join(OUTPUT_DIR, f"{video_name}.pt")
+            torch.save(full_video_feats, out_path_pt)
+        del video_feats
+        del full_video_feats
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
