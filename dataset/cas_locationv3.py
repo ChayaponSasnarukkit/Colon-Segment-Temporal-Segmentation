@@ -82,6 +82,7 @@ class MedicalStreamingDataset(IterableDataset):
                  use_memory_bank=False,
                  context_seconds=100, 
                  context_fps=5,
+                 shuffle = False,
 
                  use_emb=True,
                  emb_dim=768,
@@ -113,6 +114,8 @@ class MedicalStreamingDataset(IterableDataset):
         self.context_stride = int(fps / context_fps) 
         self.context_len_frames = context_seconds * fps 
         self.context_num_samples = context_seconds * context_fps
+        self.epoch = 0 # Initialize epoch counter
+        self.shuffle = shuffle
 
     def _load_images(self, video_id, frame_indices):
         """ Reads a list of frame indices from disk (Images). """
@@ -156,19 +159,38 @@ class MedicalStreamingDataset(IterableDataset):
                 out[i] = full_emb_tensor[frame_idx]
         return out
 
+    def set_epoch(self, epoch):
+        """Called from your training loop to update the shuffle seed"""
+        self.epoch = epoch
+
     def __iter__(self):
         worker_info = get_worker_info()
         
-        # 1. Shard the CSV
+        all_indices = list(range(len(self.df)))
+        
+        if self.shuffle:
+            # Deterministic shuffle based on epoch
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            
+            # Shuffle the indices using PyTorch's random permutation
+            indices_perm = torch.randperm(len(all_indices), generator=g).tolist()
+        else:
+            indices_perm = all_indices
+        
+        # --- 2. Shard the Work (Split among workers) ---
         if worker_info is None:
-            my_indices = list(range(len(self.df)))
+            # Single process loading
+            my_indices = indices_perm
             worker_id = 0
         else:
-            per_worker = int(math.ceil(len(self.df) / float(worker_info.num_workers)))
+            # Split the SHUFFLED indices among workers
+            per_worker = int(math.ceil(len(all_indices) / float(worker_info.num_workers)))
             start = worker_info.id * per_worker
-            end = min(start + per_worker, len(self.df))
-            # video indices that this worker has reponsibility on
-            my_indices = list(range(start, end))
+            end = min(start + per_worker, len(all_indices))
+            
+            # Slice the shuffled list
+            my_indices = indices_perm[start:end]
             worker_id = worker_info.id
 
         # 2. Define Stream Starter
