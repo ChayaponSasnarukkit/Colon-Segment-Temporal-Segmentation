@@ -381,3 +381,44 @@ class MedicalStreamingDataset(IterableDataset):
             final_ctx_mask = torch.stack(batch_ctx_mask) if self.use_memory_bank else None
             
             yield final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id
+
+# MedicalStreamingDataset(
+#     "/scratch/lt200353-pcllm/location/cas_colon/updated_Video_Label.csv", 
+#     "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
+#     2, 
+#     chunk_size=1024, 
+    
+#     # FPS Configuration
+#     fps=60,            # Source Video FPS
+#     target_fps=30,     # Desired Training FPS (New Argument)
+    
+#     # Context / Memory Bank Config
+#     use_memory_bank=True,
+#     context_seconds=300, 
+#     context_fps=1,
+#     shuffle = True,
+
+#     use_emb=True,
+#     emb_dim=1024,
+#     transform=None)
+
+
+
+# for final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id in iter(myd2):
+#      if cnt%10:
+#              print(final_ctx.shape, final_ctx_mask.sum(), final_mask)
+#      cnt+=1
+
+# cnt=0
+# for final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id in iter(myd2):
+#      cnt+=1
+
+
+# dl = DataLoader(myd2, batch_size=None, num_workers=2)
+# for i in range(5):
+#      myd2.set_epoch(i)
+#      dl = DataLoader(myd2, batch_size=None, num_workers=2)
+#      cnt = 0
+#      for x in tqdm(dl):
+#              cnt+=1
+#      print(len(myd2), cnt)
