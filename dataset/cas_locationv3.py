@@ -38,7 +38,7 @@ def build_dense_label(row, num_frames, fps=60):
     Returns -1 for frames that have no label (gaps in CSV).
     """
     # Initialize with -1 (meaning "Background" or "Unlabeled")
-    label_map = np.full(num_frames, -1, dtype=int)
+    label_map = np.full(num_frames, -100, dtype=int)
     
     for cls_name in CLASS_MAP:
         if cls_name not in row: continue
@@ -163,6 +163,54 @@ class MedicalStreamingDataset(IterableDataset):
         """Called from your training loop to update the shuffle seed"""
         self.epoch = epoch
 
+    def __len__(self):
+        """
+        Calculates the exact number of batches by simulating the streaming queue.
+        """
+        if 'TotalFrames' not in self.df.columns:
+            raise ValueError("The CSV must contain a 'TotalFrames' column to calculate __len__.")
+
+        span_needed = self.chunk_size * self.step
+        all_indices = list(range(len(self.df)))
+
+        # 1. Match the exact shuffle logic from __iter__
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices_perm = torch.randperm(len(all_indices), generator=g).tolist()
+        else:
+            indices_perm = all_indices
+
+        # 2. Setup the simulated queue
+        idx_queue = indices_perm.copy()
+        active_chunks_left = [0] * self.batch_size
+
+        def get_chunks(row_idx):
+            frames = self.df.iloc[row_idx]['TotalFrames']
+            if frames <= 0: return 0
+            return math.ceil(frames / span_needed)
+
+        # Initial fill
+        for i in range(self.batch_size):
+            if idx_queue:
+                active_chunks_left[i] = get_chunks(idx_queue.pop(0))
+
+        # 3. Run the simulation
+        total_batches = 0
+        while any(chunks > 0 for chunks in active_chunks_left):
+            total_batches += 1
+
+            # Step every active stream forward by 1 chunk
+            for i in range(self.batch_size):
+                if active_chunks_left[i] > 0:
+                    active_chunks_left[i] -= 1
+
+                    # If it just finished, load the next video from the queue
+                    if active_chunks_left[i] == 0 and idx_queue:
+                        active_chunks_left[i] = get_chunks(idx_queue.pop(0))
+
+        return total_batches
+
     def __iter__(self):
         worker_info = get_worker_info()
         
@@ -217,7 +265,7 @@ class MedicalStreamingDataset(IterableDataset):
             # Pre-calculate Labels (Full Density / Source FPS)
             # We generate labels for every frame, then sub-sample later
             dense_labels = build_dense_label(row, total_frames, self.fps)
-            
+            dense_labels = torch.from_numpy(dense_labels).long()            
             return {
                 'cursor': 0,
                 'total': total_frames,
