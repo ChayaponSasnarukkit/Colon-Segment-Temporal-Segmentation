@@ -222,7 +222,7 @@ def main_eval():
     test_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
-        2, 
+        1, 
         chunk_size=2048, 
         fps=60, 
         target_fps=30, 
@@ -234,7 +234,7 @@ def main_eval():
         emb_dim=1024,
         transform=None
     )
-    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=1)
     
     # 3. Setup Model Architecture
     config = MambaTemporalConfig(d_model=1024, n_layer=8)
