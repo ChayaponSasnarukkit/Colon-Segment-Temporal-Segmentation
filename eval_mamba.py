@@ -47,37 +47,61 @@ f1_based_weights = torch.tensor([
     0.6030   # 9: Anal_Canal
 ], dtype=torch.float32)
 
-def plot_temporal_diagram(preds, labels, video_idx, save_dir, idx_to_class):
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
+
+def plot_temporal_diagram(preds, labels, video_idx, save_dir, idx_to_class, model_fps=30):
     """
     Creates a temporal 'barcode' plot comparing Ground Truth vs. Prediction.
+    Downsamples the sequence to 1 FPS and includes a class legend.
     """
-    # Filter out ignored indices (e.g., -100) for the plot
-    valid_indices = labels != -100
-    if not np.any(valid_indices):
-        return  # Skip if the whole chunk is ignored
+    # 1. Downsample from model FPS (e.g., 30) to 1 FPS
+    # By slicing every 30th frame, we align with the 1 FPS annotations
+    preds_1fps = preds[::model_fps]
+    labels_1fps = labels[::model_fps]
     
-    clean_labels = labels[valid_indices]
-    clean_preds = preds[valid_indices]
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 4), sharex=True)
-    
-    # Create colormap based on number of classes
     num_classes = len(idx_to_class)
-    cmap = plt.get_cmap('tab20', num_classes)
     
-    # Plot Ground Truth
-    ax1.imshow(clean_labels[None, :], aspect='auto', cmap=cmap, vmin=0, vmax=num_classes-1)
-    ax1.set_title(f'Video {video_idx}: Ground Truth')
+    # 2. Map ignore_index (-100) to a new index (num_classes) for plotting purposes
+    # This prevents the timeline from squishing while handling unlabeled gaps
+    labels_mapped = np.where(labels_1fps == -100, num_classes, labels_1fps)
+    
+    # Create the figure
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 4), sharex=True)
+    
+    # 3. Create a custom colormap
+    # Use tab20 for the actual classes, and add light grey for the 'Unlabeled' (-100) areas
+    base_cmap = plt.get_cmap('tab20', num_classes)
+    colors = [base_cmap(i) for i in range(num_classes)]
+    colors.append((0.9, 0.9, 0.9, 1.0))  # Light Grey for unlabeled/ignore_index
+    cmap = mcolors.ListedColormap(colors)
+    
+    # 4. Plot Ground Truth (Top)
+    ax1.imshow(labels_mapped[None, :], aspect='auto', cmap=cmap, vmin=0, vmax=num_classes)
+    ax1.set_title(f'Video {video_idx}: Ground Truth (1 FPS)')
     ax1.set_yticks([])
     
-    # Plot Predictions
-    ax2.imshow(clean_preds[None, :], aspect='auto', cmap=cmap, vmin=0, vmax=num_classes-1)
-    ax2.set_title('Prediction')
+    # 5. Plot Predictions (Bottom)
+    # Model predictions won't have -100, so they will map normally to 0 -> num_classes-1
+    ax2.imshow(preds_1fps[None, :], aspect='auto', cmap=cmap, vmin=0, vmax=num_classes)
+    ax2.set_title('Prediction (1 FPS)')
     ax2.set_yticks([])
-    ax2.set_xlabel('Time (frames)')
+    ax2.set_xlabel('Time (Seconds / Frames at 1 FPS)')
     
+    # 6. Create the Legend
+    patches = [mpatches.Patch(color=colors[i], label=idx_to_class[i]) for i in range(num_classes)]
+    patches.append(mpatches.Patch(color=colors[num_classes], label='Unlabeled / Ignored'))
+    
+    # Place legend outside the plot to the right
+    fig.legend(handles=patches, loc='center right', bbox_to_anchor=(1.18, 0.5), fontsize=10)
+    
+    # 7. Save cleanly
+    # bbox_inches='tight' ensures the external legend isn't cut off in the saved image
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f'temporal_video_{video_idx}.png'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'temporal_video_{video_idx}.png'), dpi=150, bbox_inches='tight')
     plt.close()
 
 def plot_confusion_matrix(all_labels, all_preds, save_dir, idx_to_class):
