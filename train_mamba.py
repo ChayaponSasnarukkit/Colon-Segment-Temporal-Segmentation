@@ -32,16 +32,24 @@ def train_one_epoch(model, dataloader, optimizer, device):
     model.train()
     total_loss = 0.0
     steps = 0
-    current_states = None 
-    # final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id
-    for step, (vision_embeddings, _, labels, reset_mask, _, _) in enumerate(tqdm(dataloader)):
+    
+    # Dictionary to isolate Mamba states for each dataloader worker process
+    worker_states = {}
+
+    for step, (vision_embeddings, _, labels, reset_mask, _, worker_id) in enumerate(tqdm(dataloader)):
         vision_embeddings = vision_embeddings.to(device)
         labels = labels.to(device)
         reset_mask = reset_mask.to(device)
         
-        # Wipe states if a new video starts
+        # Extract the integer ID for the current worker. 
+        # (Dataloader collates this into a tensor, so we pull the first item)
+        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+        
+        # Retrieve the correct state history for this specific worker
+        current_states = worker_states.get(w_id, None)
+        
+        # Wipe states if a new video starts within this worker's batch
         if reset_mask.any() and current_states is not None:
-            print(reset_mask)
             current_states = apply_reset_mask(current_states, reset_mask)
 
         optimizer.zero_grad()
@@ -58,7 +66,8 @@ def train_one_epoch(model, dataloader, optimizer, device):
         optimizer.step()
         
         # Detach states to prevent OOM
-        current_states = detach_states(outputs.next_states)
+        # Save the detached states back to this specific worker's dictionary key
+        worker_states[w_id] = detach_states(outputs.next_states)
         
         total_loss += outputs.loss.item()
         steps += 1
@@ -73,20 +82,34 @@ from sklearn.metrics import accuracy_score, f1_score
 
 def validate(model, dataloader, device, ignore_index=-100):
     model.eval()
+    
+    # 1. State Isolation: Track Mamba's memory per worker
+    worker_states = {}
+    
+    # 2. Prediction Isolation: Track predictions per unique stream
+    # Key: (worker_id, stream_index_within_batch) -> Value: {'preds': [], 'labels': []}
+    stream_buffers = {}
+    
+    all_preds_global = []
+    all_labels_global = []
+    video_count = 0
     total_loss = 0.0
     steps = 0
-    current_states = None
-    
-    # Lists to store flattened predictions and labels for the whole epoch
-    all_preds = []
-    all_labels = []
-    
+
     with torch.no_grad():
-        for step, (vision_embeddings, _, labels, reset_mask, _, _) in enumerate(dataloader):
+        for step, (vision_embeddings, _, labels, reset_mask, _, worker_id) in enumerate(tqdm(dataloader)):
             vision_embeddings = vision_embeddings.to(device)
             labels = labels.to(device)
             reset_mask = reset_mask.to(device)
             
+            # Extract the integer ID for the current worker
+            w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+            
+            # Retrieve the correct state history for this specific worker
+            current_states = worker_states.get(w_id, None)
+            
+            # Mamba states usually have batch as the first dimension. 
+            # apply_reset_mask will zero out states for the specific streams where reset_mask is True.
             if reset_mask.any() and current_states is not None:
                 current_states = apply_reset_mask(current_states, reset_mask)
 
@@ -96,38 +119,64 @@ def validate(model, dataloader, device, ignore_index=-100):
                 labels=labels
             )
             
-            # Assuming your model returns logits in outputs.logits 
-            # Shape: (Batch, Time, Num_Classes) or (Time, Num_Classes)
-            logits = outputs.logits 
-            preds = torch.argmax(logits, dim=-1)
+            # Save the detached states back to this specific worker's dictionary key
+            worker_states[w_id] = detach_states(outputs.next_states)
             
-            # Flatten to 1D arrays
-            preds_flat = preds.cpu().numpy().flatten()
-            labels_flat = labels.cpu().numpy().flatten()
-            
-            # Filter out ignored indices (like padding)
-            valid_mask = labels_flat != ignore_index
-            
-            all_preds.extend(preds_flat[valid_mask])
-            all_labels.extend(labels_flat[valid_mask])
-
-            current_states = detach_states(outputs.next_states)
             total_loss += outputs.loss.item()
             steps += 1
             
-    # Compute overall metrics
+            logits = outputs.logits 
+            preds = torch.argmax(logits, dim=-1)
+            
+            batch_size = preds.shape[0]
+            
+            # 3. Untangle the interleaved batches
+            for b in range(batch_size):
+                stream_key = (w_id, b)
+                if stream_key not in stream_buffers:
+                    stream_buffers[stream_key] = {'preds': [], 'labels': []}
+                
+                # If reset_mask is True AND we have data, the PREVIOUS video on this stream just finished
+                if reset_mask[b].item() and len(stream_buffers[stream_key]['preds']) > 0:
+                    vid_preds = np.concatenate(stream_buffers[stream_key]['preds'])
+                    vid_labels = np.concatenate(stream_buffers[stream_key]['labels'])
+                        
+                    video_count += 1
+                    
+                    # Accumulate to global metrics (filtering ignore_index)
+                    valid_mask = vid_labels != ignore_index
+                    all_preds_global.extend(vid_preds[valid_mask])
+                    all_labels_global.extend(vid_labels[valid_mask])
+                    
+                    # Reset the buffer for the new video starting on this stream
+                    stream_buffers[stream_key] = {'preds': [], 'labels': []}
+                
+                # Add the current chunk to the stream buffer
+                stream_buffers[stream_key]['preds'].append(preds[b].cpu().numpy())
+                stream_buffers[stream_key]['labels'].append(labels[b].cpu().numpy())
+
+    # 4. Process any remaining videos left in the buffers after the loop ends
+    for stream_key, buffer in stream_buffers.items():
+        if len(buffer['preds']) > 0:
+            vid_preds = np.concatenate(buffer['preds'])
+            vid_labels = np.concatenate(buffer['labels'])
+                
+            video_count += 1
+            
+            valid_mask = vid_labels != ignore_index
+            all_preds_global.extend(vid_preds[valid_mask])
+            all_labels_global.extend(vid_labels[valid_mask])
+
+    # 5. Compute overall metrics
     val_loss = total_loss / (steps if steps > 0 else 1)
-    
-    # Calculate Accuracy and F1
-    acc = accuracy_score(all_labels, all_preds)
-    f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    acc = accuracy_score(all_labels_global, all_preds_global)
+    f1_macro = f1_score(all_labels_global, all_preds_global, average='macro', zero_division=0)
     
     # Calculate Per-Class F1 (Returns an array of F1 scores matching the class indices)
-    # We pass labels=range(num_classes) to ensure the array aligns perfectly with your CLASS_MAP
-    num_classes = len(np.unique(all_labels)) # Or pass len(CLASS_MAP) into the function
-    f1_per_class = f1_score(all_labels, all_preds, average=None, zero_division=0)
+    f1_per_class = f1_score(all_labels_global, all_preds_global, average=None, zero_division=0)
             
     return val_loss, acc, f1_macro, f1_per_class
+
 NUM_CLASSES = len(CLASS_MAP)
 def parse_intervals(time_str):
     intervals = []
