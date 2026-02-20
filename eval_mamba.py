@@ -128,88 +128,107 @@ def plot_confusion_matrix(all_labels, all_preds, save_dir, idx_to_class):
 
 def evaluate_and_visualize(model, dataloader, device, save_dir, idx_to_class, ignore_index=-100):
     model.eval()
-    current_states = None
-    
+
+    # 1. Dictionaries to handle Multi-Worker & Multi-Batch streams
+    worker_states = {}
+    stream_buffers = {}
+
     all_preds_global = []
     all_labels_global = []
-    
-    # To track per-video metrics
-    current_video_preds = []
-    current_video_labels = []
     video_count = 0
-    
+
     os.makedirs(save_dir, exist_ok=True)
-    
-    print("Starting evaluation...")
+    print(f"Starting evaluation (Saving results to {save_dir})...")
+
     with torch.no_grad():
-        for step, (vision_embeddings, _, labels, reset_mask, _, _) in enumerate(tqdm(dataloader)):
+        for step, (vision_embeddings, _, labels, reset_mask, _, worker_id) in enumerate(tqdm(dataloader)):
             vision_embeddings = vision_embeddings.to(device)
             labels = labels.to(device)
             reset_mask = reset_mask.to(device)
-            
-            # If a new video starts, plot the previous one and reset accumulators
-            if reset_mask.any() and len(current_video_preds) > 0:
-                plot_temporal_diagram(
-                    np.concatenate(current_video_preds), 
-                    np.concatenate(current_video_labels), 
-                    video_count, 
-                    save_dir, 
-                    idx_to_class
-                )
-                video_count += 1
-                current_video_preds = []
-                current_video_labels = []
 
+            # Identify which worker process yielded this batch
+            w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+
+            # Fetch the isolated Mamba memory for this specific worker
+            current_states = worker_states.get(w_id, None)
+
+            # Reset states for streams where a new video is starting
             if reset_mask.any() and current_states is not None:
                 current_states = apply_reset_mask(current_states, reset_mask)
 
+            # Forward pass
             outputs = model(
                 vision_embeddings=vision_embeddings,
                 pass_states=current_states,
                 labels=labels
             )
-            
-            logits = outputs.logits 
-            preds = torch.argmax(logits, dim=-1)
-            
-            # Flatten to 1D arrays
-            preds_flat = preds.cpu().numpy().flatten()
-            labels_flat = labels.cpu().numpy().flatten()
-            
-            # Accumulate for the current video (keeping ignored indices for temporal alignment, 
-            # we filter them out inside the plotting function)
-            current_video_preds.append(preds_flat)
-            current_video_labels.append(labels_flat)
-            
-            # Accumulate for global metrics (filtering out ignored indices immediately)
-            valid_mask = labels_flat != ignore_index
-            all_preds_global.extend(preds_flat[valid_mask])
-            all_labels_global.extend(labels_flat[valid_mask])
 
-            current_states = detach_states(outputs.next_states)
-            
-    # Plot the very last video after the loop finishes
-    if len(current_video_preds) > 0:
-        plot_temporal_diagram(
-            np.concatenate(current_video_preds), 
-            np.concatenate(current_video_labels), 
-            video_count, 
-            save_dir, 
-            idx_to_class
-        )
-        
-    print(f"Generated temporal diagrams for {video_count + 1} videos.")
-    
-    # Plot Global Confusion Matrix
+            # Update the worker's state memory
+            worker_states[w_id] = detach_states(outputs.next_states)
+
+            # Get predictions
+            logits = outputs.logits
+            preds = torch.argmax(logits, dim=-1)
+
+            batch_size = preds.shape[0]
+
+            # 2. Untangle the streams and reconstruct the videos
+            for b in range(batch_size):
+                stream_key = (w_id, b)
+
+                # Initialize the buffer if this stream hasn't been seen yet
+                if stream_key not in stream_buffers:
+                    stream_buffers[stream_key] = {'preds': [], 'labels': []}
+
+                # If a new video started on this specific stream AND we have old data, plot the old video
+                if reset_mask[b].item() and len(stream_buffers[stream_key]['preds']) > 0:
+                    vid_preds = np.concatenate(stream_buffers[stream_key]['preds'])
+                    vid_labels = np.concatenate(stream_buffers[stream_key]['labels'])
+
+                    # 3. Generate Temporal Chart for this completed video
+                    plot_temporal_diagram(vid_preds, vid_labels, video_count, save_dir, idx_to_class)
+                    video_count += 1
+
+                    # Accumulate to global metrics (filtering ignore_index)
+                    valid_mask = vid_labels != ignore_index
+                    all_preds_global.extend(vid_preds[valid_mask])
+                    all_labels_global.extend(vid_labels[valid_mask])
+
+                    # Clear the buffer for the new video
+                    stream_buffers[stream_key] = {'preds': [], 'labels': []}
+
+                # Append the current chunk to this stream's ongoing video
+                stream_buffers[stream_key]['preds'].append(preds[b].cpu().numpy().flatten())
+                stream_buffers[stream_key]['labels'].append(labels[b].cpu().numpy().flatten())
+
+    # 4. Flush any remaining videos left in the buffers after the dataloader finishes
+    print("Flushing final buffers...")
+    for stream_key, buffer in stream_buffers.items():
+        if len(buffer['preds']) > 0:
+            vid_preds = np.concatenate(buffer['preds'])
+            vid_labels = np.concatenate(buffer['labels'])
+
+            plot_temporal_diagram(vid_preds, vid_labels, video_count, save_dir, idx_to_class)
+            video_count += 1
+
+            valid_mask = vid_labels != ignore_index
+            all_preds_global.extend(vid_preds[valid_mask])
+            all_labels_global.extend(vid_labels[valid_mask])
+
+    print(f"Generated temporal diagrams for {video_count} videos.")
+
+    # 5. Generate the Global Confusion Matrix
     plot_confusion_matrix(all_labels_global, all_preds_global, save_dir, idx_to_class)
-    print("Generated confusion matrix.")
-    
-    # Calculate and print final metrics
+    print("Generated normalized confusion matrix.")
+
+    # 6. Calculate and print final global metrics
     acc = accuracy_score(all_labels_global, all_preds_global)
     f1_macro = f1_score(all_labels_global, all_preds_global, average='macro', zero_division=0)
-    print(f"\nFinal Test Accuracy: {acc:.4f}")
-    print(f"Final Test Macro F1: {f1_macro:.4f}")
 
+    print("\n--- Final Evaluation Metrics ---")
+    print(f"Total Valid Frames Evaluated: {len(all_labels_global)}")
+    print(f"Test Accuracy: {acc:.4f}")
+    print(f"Test Macro F1: {f1_macro:.4f}")
 
 def main_eval():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -222,7 +241,7 @@ def main_eval():
     test_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
-        1, 
+        2, 
         chunk_size=2048, 
         fps=60, 
         target_fps=30, 
@@ -234,7 +253,7 @@ def main_eval():
         emb_dim=1024,
         transform=None
     )
-    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=1)
+    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=2)
     
     # 3. Setup Model Architecture
     config = MambaTemporalConfig(d_model=1024, n_layer=8)
