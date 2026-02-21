@@ -286,6 +286,46 @@ f1_based_weights = torch.tensor([
     0.6030   # 9: Anal_Canal
 ], dtype=torch.float32)
 
+import torch.nn.functional as F
+
+class BinaryFocalLoss(torch.nn.Module):
+    def __init__(self, alpha=0.75, gamma=2.0, ignore_index=-100):
+        super().__init__()
+        self.alpha = alpha # Weights the minority class higher
+        self.gamma = gamma # Penalizes confident, easy predictions
+        self.ignore_index = ignore_index
+
+    def forward(self, inputs, targets):
+        # inputs shape: [B, T, 2] or flattened [N, 2]
+        # targets shape: [B, T] or flattened [N]
+        
+        # 1. Flatten arrays to [N, C] and [N]
+        inputs = inputs.view(-1, inputs.size(-1))
+        targets = targets.view(-1)
+        
+        # 2. Mask out ignored indices
+        valid_mask = targets != self.ignore_index
+        inputs = inputs[valid_mask]
+        targets = targets[valid_mask]
+        
+        if inputs.numel() == 0:
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True)
+
+        # 3. Calculate Cross Entropy Loss per pixel
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        
+        # 4. Get the probabilities of the correct class (pt)
+        pt = torch.exp(-ce_loss)
+        
+        # 5. Apply the alpha weighting
+        # If target=1 (Splenic), use alpha. If target=0 (Other), use 1-alpha.
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # 6. Final Focal Loss formula
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
+        
+        return focal_loss.mean()
+
 def main():
     train_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
@@ -295,7 +335,7 @@ def main():
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=60,     # Desired Training FPS (New Argument)
+        target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
@@ -315,7 +355,7 @@ def main():
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=60,     # Desired Training FPS (New Argument)
+        target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
@@ -339,9 +379,10 @@ def main():
         # Splenic Flexure is incredibly rare. We heavily penalize missing it (Class 1)
         # and lightly penalize misclassifying the background (Class 0).
         # You can tune this ratio (e.g., 1 to 20)
-        binary_weights = torch.tensor([0.1, 5.0], dtype=torch.float32).to(device)
+        binary_weights = torch.tensor([0.5233, 11.2262], dtype=torch.float32).to(device)
         loss_fn = torch.nn.CrossEntropyLoss(weight=binary_weights, ignore_index=-100)
-        print("Using WEIGHTED 1-vs-All Loss")
+        # print("Using WEIGHTED 1-vs-All Loss")
+        #loss_fn = BinaryFocalLoss(alpha=0.95, gamma=2.0, ignore_index=-100).to(device)
     else:
         loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
         print("Using UNWEIGHTED 1-vs-All Loss")
@@ -357,10 +398,10 @@ def main():
     epochs = 50
     patience = 12  # How many epochs to wait for improvement before stopping
     patience_counter = 0
-    best_val_loss = float('inf')
+    best_F1 = 0
     save_dir = "./checkpoints/base_shuffle_focal"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best_mamba_model_4096_60fps.pth")
+    best_model_path = os.path.join(save_dir, "best_mamba_model_4096_oaa.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -409,10 +450,10 @@ def main():
         
         # 5. Save Model & Early Stopping Logic
         # (You might want to change early stopping to track val_f1_macro instead of val_loss!)
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if best_F1 < val_f1_per_class[1]:
+            best_F1 = val_f1_per_class[1]
             patience_counter = 0
-            print(f"\nNew best validation loss ({best_val_loss:.4f})! Saving model...")
+            print(f"\nNew best F1 ({best_F1:.4f})! Saving model...")
             torch.save(model.state_dict(), best_model_path)
         else:
             patience_counter += 1
