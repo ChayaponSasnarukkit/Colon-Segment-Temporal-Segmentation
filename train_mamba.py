@@ -264,12 +264,12 @@ def main():
     train_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
-        2, 
-        chunk_size=2048, 
+        1, 
+        chunk_size=4096, 
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=30,     # Desired Training FPS (New Argument)
+        target_fps=60,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
@@ -284,12 +284,12 @@ def main():
     val_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
-        2, 
-        chunk_size=2048, 
+        1, 
+        chunk_size=4096, 
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=30,     # Desired Training FPS (New Argument)
+        target_fps=60,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
@@ -304,8 +304,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vision_feature_dim = 1024
     num_action_classes = len(CLASS_MAP)
-    #weight_tensor = compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device)
+    weight_tensor = compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device)
     loss_fn=torch.nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)
+    #loss_fn=torch.nn.CrossEntropyLoss(weight=weight_tensor.to(device), ignore_index=-100)
+    #loss_fn=torch.nn.CrossEntropyLoss(ignore_index=-100)
     #print(weight_tensor)
     #class_weights = (1.0 - f1_scores) + 0.05
     #loss_fn = FocalLoss(weight=class_weights.to(device), gamma=2.0, ignore_index=-100)
@@ -320,12 +322,12 @@ def main():
     )
     # --- Training Configuration ---
     epochs = 50
-    patience = 5  # How many epochs to wait for improvement before stopping
+    patience = 12  # How many epochs to wait for improvement before stopping
     patience_counter = 0
     best_val_loss = float('inf')
     save_dir = "./checkpoints/base_shuffle_focal"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "best_mamba_model_4096_60fps.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -338,14 +340,14 @@ def main():
 
     # --- Main Training Loop ---
     IDX_TO_CLASS = {v: k for k, v in CLASS_MAP.items()}
-    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=2)
+    val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
 
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
         # 1. Train
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2)
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=1)
         train_loss = train_one_epoch(model, train_loader, optimizer, device)
         
         # 2. Validate (Now receiving metrics)

@@ -21,7 +21,7 @@ class MambaTemporalConfig:
     
     # --- SSM Specifics ---
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 32,           # Increased from NLP default (16) to capture complex visual motions
+        "d_state": 16,           # Increased from NLP default (16) to capture complex visual motions
         "d_conv": 4,             # Temporal convolution window (4 frames)
         "expand": 2,             # Internal feature expansion factor
         "dt_rank": "auto",       # Will default to math.ceil(d_model / 16)
@@ -253,7 +253,7 @@ def main_eval():
         emb_dim=1024,
         transform=None
     )
-    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=1)
     
     # 3. Setup Model Architecture
     config = MambaTemporalConfig(d_model=1024, n_layer=8)
@@ -268,13 +268,13 @@ def main_eval():
     )
     
     # 4. Load the Model Weights
-    checkpoint_path = "./checkpoints/base_shuffle/best_mamba_model.pth"
+    checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
     print(f"Loading weights from {checkpoint_path}...")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     model.to(device)
     
     # 5. Run Evaluation
-    save_directory = "./evaluation_results"
+    save_directory = "./evaluation_results/best_small_mamba_model_4096"
     evaluate_and_visualize(
         model=model, 
         dataloader=test_loader, 
