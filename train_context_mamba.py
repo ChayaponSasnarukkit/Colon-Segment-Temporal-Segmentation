@@ -33,7 +33,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-
+import random
+import numpy as np
 CLASS_MAP = {
     'Terminal_Ileum': 0,
     'Cecum': 1,
@@ -72,7 +73,7 @@ class TransitionPenaltyLoss(nn.Module):
         # Create and cache the penalty matrix W
         indices = torch.arange(num_classes, dtype=torch.float32)
         diff_matrix = torch.abs(indices.unsqueeze(0) - indices.unsqueeze(1))
-        penalty_matrix = torch.clamp(diff_matrix - 1.0, min=0.0) ** 2 
+        penalty_matrix = torch.clamp(diff_matrix - 1.0, min=0.0) 
         
         # register_buffer automatically moves this to the correct device with the model
         self.register_buffer('penalty_matrix', penalty_matrix)
@@ -103,15 +104,15 @@ def safe_ce_loss(logits, targets, criterion):
 
 from train_mamba import f1_based_weights, compute_class_weights
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
-                    lambda_smooth=0.5, lambda_jump=0.5):
+                    lambda_smooth=0.5, lambda_jump=0.0):
     model.train()
     total_loss = 0.0
     steps = 0
     
     worker_states = {}
-    # criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    # criterion = nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)
-    criterion = nn.CrossEntropyLoss(weight=compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device), ignore_index=-100)
+    #criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    criterion = nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)
+    # criterion = nn.CrossEntropyLoss(weight=compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device), ignore_index=-100)
     transition_penalty_loss = TransitionPenaltyLoss().to(device)
 
     optimizer.zero_grad() 
@@ -179,13 +180,16 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
 from sklearn.metrics import accuracy_score, f1_score
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
-             lambda_smooth=0.5, lambda_jump=0.5):
+             lambda_smooth=0.0, lambda_jump=0.0):
     model.eval()
     total_loss = 0.0
     steps = 0
     
     worker_states = {}
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    #criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    #criterion = nn.CrossEntropyLoss(ignore_index=-100)                                                                    
+    criterion = nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)                                
+    # criterion = nn.CrossEntropyLoss(weight=compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device), ignore_index=-100)
 
     all_preds = []
     all_labels = []
@@ -267,7 +271,31 @@ def validate(model, dataloader, device, transition_penalty_loss,
 
     return avg_loss, val_acc, val_f1_macro, val_f1_per_class
 
+def set_seed(seed=42):
+    """Sets the seed for reproducibility across all libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+    
+    # These ensure deterministic behavior but might slow down training slightly
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    print(f"Global seed set to {seed}")
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+SEED = 42
 def main():
+    set_seed()
+    g = torch.Generator()
+    g.manual_seed(SEED)
     freeze = True
     train_dataset = MedicalStreamingDataset(
         "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
@@ -339,7 +367,7 @@ def main():
     best_val_loss = float('inf')
     save_dir = "./checkpoints/full_shuffle"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "short_nojump_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -359,8 +387,8 @@ def main():
         
         # 1. Train
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device)
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
