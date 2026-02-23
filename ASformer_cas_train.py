@@ -2,17 +2,39 @@ import torch
 import numpy as np
 import random
 import os
+import pandas as pd
 from model.ASFormer import Trainer
 
+# --- Helper to parse time strings like "1:23" to seconds ---
+def time_to_seconds(t_str):
+    try:
+        parts = t_str.strip().split(':')
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except:
+        return 0
+    return 0
+
 class BatchGenerator(object):
-    def __init__(self, num_classes, actions_dict, gt_path, features_path, sample_rate):
+    def __init__(self, actions_dict, csv_path, features_path, target_fps=1):
         self.list_of_examples = list()
         self.index = 0
-        self.num_classes = num_classes
         self.actions_dict = actions_dict
-        self.gt_path = gt_path
         self.features_path = features_path
-        self.sample_rate = sample_rate
+        self.csv_path = csv_path
+        
+        # Original video metadata is 60fps based on your CSV description
+        self.csv_fps = 60.0 
+        
+        # The new FPS you want to train on (e.g., 1 fps or 5 fps)
+        self.target_fps = target_fps
+        
+        self.df = pd.read_csv(self.csv_path)
+        self.df.columns = [c.strip() for c in self.df.columns]
+        self.list_of_examples = self.df['VideoID'].astype(str).tolist()
+        self.reset()
 
     def reset(self):
         self.index = 0
@@ -21,208 +43,187 @@ class BatchGenerator(object):
     def has_next(self):
         return self.index < len(self.list_of_examples)
 
-    def read_data(self, vid_list_file):
-        # Reads the "split file" which is just a list of video IDs
-        with open(vid_list_file, 'r') as f:
-            self.list_of_examples = [line.strip() for line in f if line.strip()]
-        random.shuffle(self.list_of_examples)
-
-    def next_batch(self, batch_size, tmp):
-        batch = self.list_of_examples[self.index:self.index + batch_size]
+    def next_batch(self, batch_size):
+        batch_ids = self.list_of_examples[self.index:self.index + batch_size]
         self.index += batch_size
 
         batch_input = []
         batch_target = []
         
-        for vid in batch:
-            features = np.load(self.features_path + vid.split('.')[0] + '.npy')
-            
-            # --- FIX START ---
-            # Instead of comparing dimensions, explicitly look for the feature dim (2048)
-            # We want the shape to be (2048, Time)
-            if features.shape[1] == 2048:
+        for vid in batch_ids:
+            # --- 1. Load Features ---
+            feat_path = os.path.join(self.features_path, f"{vid}.pt")
+            try:
+                features = torch.load(feat_path, map_location='cpu')
+                if isinstance(features, torch.Tensor):
+                    features = features.numpy()
+            except FileNotFoundError:
+                print(f"⚠️ Feature file not found: {feat_path}")
+                continue
+
+            # Ensure shape is (Dim, Time)
+            if features.shape[0] > features.shape[1]: 
                 features = features.T
-            # --- FIX END ---
+            
+            # --- 2. Calculate New Target Length ---
+            row = self.df[self.df['VideoID'].astype(str) == str(vid)].iloc[0]
+            total_frames_csv = int(row['TotalFrames']) # Original length at 60fps
+            
+            # Calculate duration in seconds
+            duration_sec = total_frames_csv / self.csv_fps
+            
+            # Calculate the new desired length at target_fps
+            target_len = int(duration_sec * self.target_fps)
+            
+            # Safety check: avoid empty sequences
+            if target_len < 1: target_len = 1
 
-            features = features[:, ::self.sample_rate]
+            # --- 3. Resample Features ---
+            # Create indices to downsample features to target_len
+            curr_feat_len = features.shape[1]
+            feat_indices = np.linspace(0, curr_feat_len - 1, target_len).astype(int)
             
-            with open(self.gt_path + vid.split('.')[0] + '.txt', 'r') as f:
-                content = f.read().split('\n')
-                if content[-1] == '': content = content[:-1]
-            
-            #labels = [self.actions_dict[c] for c in content][::self.sample_rate]
-            # Use .get(c, -100) -> If 'c' is not in the dict, return -100 (Ignore Index)
-            labels = []
-            for i, c in enumerate(content):
-                # Check if the class is missing from our dictionary
-                if c not in self.actions_dict:
-                    print(f"⚠️  MISSING CLASS: '{c}' found in Video: {vid}, Frame: {i}")
-                    
-                    # Optional: crash here if you want to stop and fix the CSV
-                    # raise KeyError(f"Class '{c}' not found in mapping!")
-                    
-                    # OR: Assign -100 (Ignore) to keep training running
-                    labels.append(-100)
-                else:
-                    labels.append(self.actions_dict[c])
-            
-            # Apply sample rate after building the list
-            labels = labels[::self.sample_rate]
-            # Ensure we don't crash if labels/features length mismatch slightly
-            min_len = min(features.shape[1], len(labels))
-            batch_input.append(features[:, :min_len])
-            batch_target.append(labels[:min_len])
+            # Slice the features (Dim, Time) -> (Dim, New_Time)
+            features = features[:, feat_indices]
 
+            # --- 4. Generate & Resample Labels ---
+            # First, create the dense label array at full 60fps resolution
+            full_res_labels = np.full(total_frames_csv, -100, dtype=int) # -100 is ignore index
+            
+            for action_name, action_id in self.actions_dict.items():
+                if action_name in row and not pd.isna(row[action_name]):
+                    time_entry = str(row[action_name])
+                    ranges = time_entry.split('/')
+                    for rng in ranges:
+                        rng = rng.strip()
+                        if '-' in rng:
+                            start_str, end_str = rng.split('-')
+                            # Convert time to frame indices (at 60fps)
+                            start_frame = int(time_to_seconds(start_str) * self.csv_fps)
+                            end_frame = int(time_to_seconds(end_str) * self.csv_fps)
+                            
+                            start_frame = max(0, min(start_frame, total_frames_csv))
+                            end_frame = max(0, min(end_frame, total_frames_csv))
+                            
+                            full_res_labels[start_frame:end_frame] = action_id
+            
+            # Now resample labels to match the features we just downsampled
+            # We map 0..total_frames_csv -> 0..target_len
+            label_indices = np.linspace(0, total_frames_csv - 1, target_len).astype(int)
+            labels = full_res_labels[label_indices]
+
+            batch_input.append(features)
+            batch_target.append(labels)
+
+        if not batch_input:
+            return None, None, None, []
+
+        # --- 5. Pad Batch ---
         length_of_sequences = [len(l) for l in batch_target]
         max_len = max(length_of_sequences)
+        feat_dim = batch_input[0].shape[0]
         
-        np_batch_input = np.zeros((batch_size, batch_input[0].shape[0], max_len), dtype='float32')
-        np_batch_target = np.ones((batch_size, max_len), dtype='int64') * -100
-        mask = np.zeros((batch_size, 1, max_len), dtype='float32')
+        np_batch_input = np.zeros((len(batch_input), feat_dim, max_len), dtype='float32')
+        np_batch_target = np.ones((len(batch_target), max_len), dtype='int64') * -100
+        mask = np.zeros((len(batch_input), 1, max_len), dtype='float32')
 
-        for i in range(batch_size):
+        for i in range(len(batch_input)):
             l = length_of_sequences[i]
             np_batch_input[i, :, :l] = batch_input[i]
             np_batch_target[i, :l] = batch_target[i]
             mask[i, :, :l] = 1
 
-        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask), batch
-    """def next_batch(self, batch_size, tmp):
-        batch = self.list_of_examples[self.index:self.index + batch_size]
-        self.index += batch_size
+        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask), batch_ids
 
-        batch_input = []
-        batch_target = []
-        
-        for vid in batch:
-            features = np.load(self.features_path + vid.split('.')[0] + '.npy')
-            if features.shape[0] > features.shape[1]: features = features.T
-            features = features[:, ::self.sample_rate]
-            
-            with open(self.gt_path + vid.split('.')[0] + '.txt', 'r') as f:
-                content = f.read().split('\n')
-                if content[-1] == '': content = content[:-1]
-            
-            labels = [self.actions_dict[c] for c in content][::self.sample_rate]
-            min_len = min(features.shape[1], len(labels))
-            batch_input.append(features[:, :min_len])
-            batch_target.append(labels[:min_len])
+# --- Main Script ---
 
-        length_of_sequences = [len(l) for l in batch_target]
-        max_len = max(length_of_sequences)
-        
-        np_batch_input = np.zeros((batch_size, batch_input[0].shape[0], max_len), dtype='float32')
-        np_batch_target = np.ones((batch_size, max_len), dtype='int64') * -100
-        mask = np.zeros((batch_size, 1, max_len), dtype='float32')
-
-        for i in range(batch_size):
-            l = length_of_sequences[i]
-            np_batch_input[i, :, :l] = batch_input[i]
-            np_batch_target[i, :l] = batch_target[i]
-            mask[i, :, :l] = 1
-
-        return torch.tensor(np_batch_input), torch.tensor(np_batch_target), torch.tensor(mask)"""
-    
-import torch
-import os
-import argparse
-import random
-import numpy as np
-
-# --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Set seeds for reproducibility
 SEED = 19980125
 random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--action', default='train', choices=['train', 'predict'])
-    parser.add_argument('--split', default='1', help='Split number (e.g., 1)')
-    parser.add_argument('--num_epochs', type=int, default=50)
-    parser.add_argument('--lr', type=float, default=0.0005)
-    return parser.parse_args()
-
 def main():
-    args = get_args()
+    # --- CONFIG ---
+    action = 'train' 
+    num_epochs = 50
+    lr = 0.0005
     
-    # 1. Setup Paths
-    data_root = os.path.join("/scratch/lt200353-pcllm/location/cas_colon/")
-    features_path = os.path.join("/scratch/lt200353-pcllm/location/cas_colon/", "features/") 
-    gt_path = os.path.join("/scratch/lt200353-pcllm/location/cas_colon/", "ground_truth/")   
+    # !!! SET THIS TO AVOID OOM !!!
+    # 1 fps = 1200 frames for 20 mins (Very safe)
+    # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
+    TARGET_FPS = 30 
     
-    splits_dir = os.path.join(data_root, "splits")
-    mapping_file = os.path.join(data_root, "mapping.txt")
+    base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
+    features_path = os.path.join(base_dir, "features_dinov3/") 
+    train_split_csv = os.path.join(base_dir, "updated_train_split.csv")
+    test_split_csv = os.path.join(base_dir, "updated_test_split.csv")
     
-    train_split_file = os.path.join(splits_dir, f"train.split{args.split}.bundle")
-    test_split_file = os.path.join(splits_dir, f"test.split{args.split}.bundle")
-    
-    save_dir = os.path.join(data_root, f"split_{args.split}")
+    save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    # 2. Load Mapping (Class list)
-    if not os.path.exists(mapping_file):
-        raise FileNotFoundError(f"Mapping file not found at {mapping_file}. Run generate_labels.py first!")
-
-    with open(mapping_file, 'r') as f:
-        actions = f.read().splitlines()
-        
-    actions_dict = {}
-    for a in actions:
-        parts = a.split()
-        # Format: "0 Terminal_Ileum" -> ID: 0, Name: Terminal_Ileum
-        actions_dict[parts[1]] = int(parts[0])
-        
+    # Define Classes
+    class_names = [
+        "Terminal_Ileum", "Cecum", "Ascending_Colon", "Hepatic_Flexure", 
+        "Transverse_Colon", "Splenic_Flexure", "Descending_Colon", 
+        "Sigmoid_Colon", "Rectum", "Anal_Canal"
+    ]
+    actions_dict = {name: i for i, name in enumerate(class_names)}
     num_classes = len(actions_dict)
-    print(f"Loaded {num_classes} classes from mapping file.")
 
-    # 3. Initialize Trainer
-    # Parameters matched to ASFormer paper defaults
-    trainer = Trainer(10, 2, 2, 64, 2048, num_classes, 0.3)
+    # Detect Dim
+    try:
+        sample_file = os.listdir(features_path)[0]
+        sample_feat = torch.load(os.path.join(features_path, sample_file), map_location='cpu')
+        input_dim = min(sample_feat.shape)
+        print(f"Detected Feature Dim: {input_dim}")
+    except IndexError:
+        print("Error: No feature files found.")
+        return
 
-    # 4. Initialize Data Generators
-    # Train Generator
-    batch_gen_train = BatchGenerator(num_classes, actions_dict, gt_path, features_path, sample_rate=1)
-    if os.path.exists(train_split_file):
-        batch_gen_train.read_data(train_split_file)
+    trainer = Trainer(
+        num_layers=10, 
+        r1=2, 
+        r2=2, 
+        num_f_maps=64, 
+        input_dim=input_dim, 
+        num_classes=num_classes, 
+        channel_mask_rate=0.3
+    )
+
+    if os.path.exists(train_split_csv):
+        # Pass TARGET_FPS here
+        batch_gen_train = BatchGenerator(actions_dict, train_split_csv, features_path, target_fps=TARGET_FPS)
     else:
-        raise FileNotFoundError(f"Train split not found: {train_split_file}")
+        raise FileNotFoundError(f"Train CSV not found")
 
-    # Test Generator
-    batch_gen_test = BatchGenerator(num_classes, actions_dict, gt_path, features_path, sample_rate=1)
-    if os.path.exists(test_split_file):
-        batch_gen_test.read_data(test_split_file)
+    if os.path.exists(test_split_csv):
+        batch_gen_test = BatchGenerator(actions_dict, test_split_csv, features_path, target_fps=TARGET_FPS)
     else:
-        print(f"Warning: Test split not found at {test_split_file}. Validation will be skipped.")
         batch_gen_test = None
 
-    # 5. Run Training
-    if args.action == 'train':
-        print(f"Starting training for {args.num_epochs} epochs...")
+    if action == 'train':
+        print(f"Starting training at {TARGET_FPS} FPS...")
         trainer.train(
             save_dir=save_dir,
             batch_gen=batch_gen_train,
-            num_epochs=args.num_epochs,
-            batch_size=1, # ASFormer uses batch_size=1 for full video context
-            learning_rate=args.lr,
+            num_epochs=num_epochs,
+            batch_size=1, 
+            learning_rate=lr,
             batch_gen_tst=batch_gen_test
         )
         
-    elif args.action == 'predict':
-        print("Starting prediction...")
+    elif action == 'predict':
         trainer.predict(
             model_dir=save_dir,
             results_dir=os.path.join(save_dir, "results"),
             features_path=features_path,
             batch_gen=batch_gen_test,
-            epoch=args.num_epochs, # Loads the last epoch by default
+            epoch=num_epochs, 
             actions_dict=actions_dict,
-            sample_rate=1
+            sample_rate=1 
         )
 
 if __name__ == "__main__":

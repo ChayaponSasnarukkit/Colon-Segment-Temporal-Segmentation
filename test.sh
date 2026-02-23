@@ -17,5 +17,5 @@ conda activate myenv
 echo "Environment Activated: $CONDA_DEFAULT_ENV"
 
 # 5. Run the 
-# srun python ASformer_cas_train.py
-srun python eval_asformer.py
+srun python ASformer_cas_train.py
+# srun python eval_asformer.py
