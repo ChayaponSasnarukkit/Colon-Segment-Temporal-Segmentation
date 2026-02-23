@@ -70,12 +70,28 @@ class ContextMamba(nn.Module):
         
         # Projection layer for fusing current state and anticipated future
         # Added Norm, Activation, and Dropout to enrich this fusion step as well
+        self.future_cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, 
+            num_heads=8,          # 8 heads is standard for d_model=1024
+            dropout=dropout, 
+            batch_first=True
+        )
+        
+        # 2. Projection and Gating
         self.future_fusion_proj = nn.Sequential(
             nn.Linear(d_model * 2, d_model, **factory_kwargs),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(dropout)
         )
+        
+        # Gate to control information flow and prevent "phase bleeding"
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
     
     def compute_normalized_dts(self, B, M, K, device, dtype):
         """
@@ -165,14 +181,48 @@ class ContextMamba(nn.Module):
         future_logits = self.future_classifier(future_token)
         
         # Pool the future predictions to get a single context vector per timestep
-        summarized_future = future_token_q.mean(dim=2) # [B, M, D]
+        # summarized_future = future_token_q.mean(dim=2) # [B, M, D]
         
         # Concatenate and project back to original dimension
-        fused_features = torch.cat([enhanced_embeddings, summarized_future], dim=-1) # [B, M, 2D]
-        fusion_projection = self.future_fusion_proj(fused_features)            # [B, M, D]
-        future_aware_embeddings = enhanced_embeddings + fusion_projection
+        # fused_features = torch.cat([enhanced_embeddings, summarized_future], dim=-1) # [B, M, 2D]
+        # fusion_projection = self.future_fusion_proj(fused_features)            # [B, M, D]
+        # future_aware_embeddings = enhanced_embeddings + fusion_projection
+
+        B, M, num_future, D = future_token_q.shape
+
+        # 2. Reshape for MultiheadAttention
+        # We collapse Batch and Sequence length so each step M acts as an independent query
+        # Query (Current Frame): [B*M, 1, D]
+        q = enhanced_embeddings.view(B * M, 1, D)
         
-        # Final prediction using the future-aware features
+        # Keys/Values (Future Anticipation): [B*M, num_future, D]
+        # NOTE: Using .detach() here stops the gradient tug-of-war. The anticipation head 
+        # is forced to only learn from loss_future, not from loss_w.
+        # kv = future_token_q.detach().view(B * M, num_future, D) 
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        # 3. Apply Cross Attention
+        # attn_output shape: [B*M, 1, D]
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        
+        # 4. Reshape back to sequence dimensions
+        attended_future = attn_output.view(B, M, D) # [B, M, D]
+
+        # --- Gated Residual Connection ---
+        
+        # Concatenate current and attended future
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1) # [B, M, 2D]
+        
+        # Project back to d_model
+        fusion_projection = self.future_fusion_proj(fused_features)                # [B, M, D]
+        
+        # Calculate dynamic gate (0 to 1) based on the concatenated features
+        gate = self.fusion_gate(fused_features)                                    # [B, M, D]
+        
+        # Apply gated residual connection and normalize
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        
+        # Final prediction using the safely fused features
         logits_w_future = self.classifier_w_future(future_aware_embeddings)
         
         return logits_wo_future, future_logits, logits_w_future, next_states

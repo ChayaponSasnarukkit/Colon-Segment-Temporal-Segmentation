@@ -94,7 +94,14 @@ class TransitionPenaltyLoss(nn.Module):
         return expected_penalty[valid_mask].mean()
 
 # --- 2. Training Loop ---
+def safe_ce_loss(logits, targets, criterion):
+    """Prevents NaN loss when all targets in a batch are the ignore_index."""
+    if (targets != -100).sum() == 0:
+        # Multiply by 0.0 to return 0 while keeping the grad_fn alive
+        return logits.sum() * 0.0 
+    return criterion(logits, targets)
 
+from train_mamba import f1_based_weights, compute_class_weights
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
                     lambda_smooth=0.5, lambda_jump=0.5):
     model.train()
@@ -102,7 +109,9 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
     steps = 0
     
     worker_states = {}
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    # criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    # criterion = nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)
+    criterion = nn.CrossEntropyLoss(weight=compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device), ignore_index=-100)
     transition_penalty_loss = TransitionPenaltyLoss().to(device)
 
     optimizer.zero_grad() 
@@ -134,11 +143,11 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         )
         
         # --- Multi-Objective CrossEntropy Losses ---
-        loss_wo = criterion(logits_wo_future.view(-1, model.num_classes), labels.view(-1))
-        loss_w  = criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
-        loss_future = criterion(future_logits.view(-1, model.num_classes), future_labels.view(-1))
+        loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
+        loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
         
-        ce_loss = (loss_wo + loss_w + loss_future) / 3.0
+        ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
 
         # --- Custom Temporal Constraints ---
         # Apply constraints to the final, most refined predictions (logits_w_future)
