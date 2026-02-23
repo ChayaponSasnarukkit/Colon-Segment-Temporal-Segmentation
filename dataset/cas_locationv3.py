@@ -83,6 +83,7 @@ class MedicalStreamingDataset(IterableDataset):
                  context_seconds=100, 
                  context_fps=5,
                  shuffle = False,
+                 num_future_seconds=3,
 
                  use_emb=True,
                  emb_dim=768,
@@ -116,6 +117,9 @@ class MedicalStreamingDataset(IterableDataset):
         self.context_num_samples = context_seconds * context_fps
         self.epoch = 0 # Initialize epoch counter
         self.shuffle = shuffle
+
+        self.num_future = num_future_seconds
+        self.future_offsets = torch.arange(1, self.num_future + 1) * fps
 
     def _load_images(self, video_id, frame_indices):
         """ Reads a list of frame indices from disk (Images). """
@@ -294,6 +298,7 @@ class MedicalStreamingDataset(IterableDataset):
             batch_curr = []
             batch_ctx = []
             batch_lbl = []
+            batch_future_lbl = []
             reset_mask = []
             batch_ctx_mask = []
 
@@ -387,6 +392,25 @@ class MedicalStreamingDataset(IterableDataset):
                 # Efficient way to index a tensor with a list
                 lbl_tensor = stream['labels'][curr_indices] 
 
+                # --- NEW: Fetch Future Labels Safely [Shape: M, num_future] ---
+                # 1. Expand curr_indices to [M, 1] and offsets to [1, num_future]
+                curr_idx_tensor = torch.tensor(curr_indices).unsqueeze(1) 
+                offsets_tensor = self.future_offsets.unsqueeze(0)
+                
+                # 2. Broadcast add -> shape: [M, num_future]
+                # Row i contains the 3 future indices for curr_indices[i]
+                future_indices_tensor = curr_idx_tensor + offsets_tensor
+                
+                # 3. Create mask for valid future indices (handles the edge of the video)
+                valid_future_mask = future_indices_tensor < stream['total']
+                
+                # 4. Initialize future labels with -100 (padding)
+                future_lbl_tensor = torch.full((len(curr_indices), self.num_future), -100, dtype=torch.long)
+                
+                # 5. Populate only the valid indices
+                valid_f_idx = future_indices_tensor[valid_future_mask]
+                future_lbl_tensor[valid_future_mask] = stream['labels'][valid_f_idx]
+
                 # --- D. Right Padding (If near end of video) ---
                 actual_sampled_len = len(curr_indices)
                 
@@ -402,11 +426,15 @@ class MedicalStreamingDataset(IterableDataset):
                     lbl_pad = torch.full((pad_len,), -100, dtype=torch.long)
                     lbl_tensor = torch.cat([lbl_tensor, lbl_pad], dim=0)
 
+                    lbl_pad_future = torch.full((pad_len, self.num_future), -100, dtype=torch.long)
+                    future_lbl_tensor = torch.cat([future_lbl_tensor, lbl_pad_future], dim=0)
+
                 batch_curr.append(curr_tensor)
                 if self.use_memory_bank:
                     batch_ctx.append(ctx_tensor)
                     batch_ctx_mask.append(ctx_mask)
                 batch_lbl.append(lbl_tensor)
+                batch_future_lbl.append(future_lbl_tensor)
                 
                 # --- E. Advance Stream ---
                 reset_mask.append(curr_start == 0)
@@ -427,8 +455,9 @@ class MedicalStreamingDataset(IterableDataset):
             final_mask = torch.tensor(reset_mask)
             final_ctx = torch.stack(batch_ctx) if self.use_memory_bank else None
             final_ctx_mask = torch.stack(batch_ctx_mask) if self.use_memory_bank else None
+            final_future_lbl = torch.stack(batch_future_lbl)
             
-            yield final_curr, final_ctx, final_lbl, final_mask, final_ctx_mask, worker_id
+            yield final_curr, final_ctx, final_lbl, final_future_lbl, final_mask, final_ctx_mask, worker_id
 
 # MedicalStreamingDataset(
 #     "/scratch/lt200353-pcllm/location/cas_colon/updated_Video_Label.csv", 

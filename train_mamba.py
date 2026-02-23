@@ -36,7 +36,7 @@ def train_one_epoch(model, dataloader, optimizer, device):
     # Dictionary to isolate Mamba states for each dataloader worker process
     worker_states = {}
 
-    for step, (vision_embeddings, _, labels, reset_mask, _, worker_id) in enumerate(tqdm(dataloader)):
+    for step, (vision_embeddings, contexts, labels, reset_mask, context_masks, worker_id) in enumerate(tqdm(dataloader)):
         vision_embeddings = vision_embeddings.to(device)
         labels = labels.to(device)
         reset_mask = reset_mask.to(device)
@@ -97,7 +97,7 @@ def validate(model, dataloader, device, ignore_index=-100):
     steps = 0
 
     with torch.no_grad():
-        for step, (vision_embeddings, _, labels, reset_mask, _, worker_id) in enumerate(tqdm(dataloader)):
+        for step, (vision_embeddings, context, labels, reset_mask, context_mask, worker_id) in enumerate(tqdm(dataloader)):
             vision_embeddings = vision_embeddings.to(device)
             labels = labels.to(device)
             reset_mask = reset_mask.to(device)

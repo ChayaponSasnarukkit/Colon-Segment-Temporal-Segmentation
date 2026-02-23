@@ -557,8 +557,8 @@ class MambaTemporalSegmentation(nn.Module):
             # Flatten to (B * L, num_classes) and (B * L)
             loss = self.loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-        Output = namedtuple("Output", ["loss", "logits", "next_states"])
-        return Output(loss=loss, logits=logits, next_states=new_states)
+        Output = namedtuple("Output", ["loss", "logits", "next_states", "hidden_states"])
+        return Output(loss=loss, logits=logits, next_states=new_states, hidden_states=hidden_states)
     
 def detach_states(states):
     """Safely detaches both SSM and Convolutional states from the computational graph."""
