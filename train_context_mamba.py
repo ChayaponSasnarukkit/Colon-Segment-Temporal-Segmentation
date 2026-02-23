@@ -103,7 +103,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
     
     worker_states = {}
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    transition_penalty_loss = TransitionPenaltyLoss()
+    transition_penalty_loss = TransitionPenaltyLoss().to(device)
 
     optimizer.zero_grad() 
 
@@ -180,6 +180,11 @@ def validate(model, dataloader, device, transition_penalty_loss,
 
     all_preds = []
     all_labels = []
+    total_loss_wo = 0.0
+    total_loss_w = 0.0
+    total_loss_future = 0.0
+    total_loss_smooth = 0.0
+    total_loss_jump = 0.0
 
     for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
         vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
@@ -266,7 +271,7 @@ def main():
         target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
-        use_memory_bank=False,
+        use_memory_bank=True,
         context_seconds=600, # whole video, average total of 10 minutes = 10*7 420*30
         context_fps=4,
         shuffle = True,
@@ -286,7 +291,7 @@ def main():
         target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
-        use_memory_bank=False,
+        use_memory_bank=True,
         context_seconds=600, 
         context_fps=4,
         shuffle = False,
@@ -317,7 +322,7 @@ def main():
         for param in model.parameters():
             param.requires_grad = False
     
-    full_model = ContextMamba(base_model=model.backbone)
+    full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
     # --- Training Configuration ---
     epochs = 50
     patience = 12  # How many epochs to wait for improvement before stopping
@@ -339,17 +344,17 @@ def main():
     # --- Main Training Loop ---
     IDX_TO_CLASS = {v: k for k, v in CLASS_MAP.items()}
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
-
+    transition_penalty_loss = TransitionPenaltyLoss().to(device)
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
         # 1. Train
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=1)
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2)
         train_loss = train_one_epoch(full_model, train_loader, optimizer, device)
         
         # 2. Validate (Now receiving metrics)
-        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device)
+        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
         
         # 3. Print Summary
         print(f"Epoch {epoch+1} Summary:")

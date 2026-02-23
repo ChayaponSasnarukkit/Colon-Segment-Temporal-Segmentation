@@ -107,7 +107,7 @@ class ContextMamba(nn.Module):
         x, next_states = self.base_model(
             vision_embeddings=vision_embeddings, 
             pass_states=pass_states, 
-            labels=labels
+            #labels=labels
         )
 
         B, M, D = x.shape
