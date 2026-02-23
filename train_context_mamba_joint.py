@@ -381,11 +381,24 @@ def main():
     # Save path for the new joint-training run
     save_dir = "./checkpoints/full_shuffle_joint" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "joint_opt_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "joint_opt_s_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
-    optimizer = torch.optim.AdamW(full_model.parameters(), lr=0.5e-4, weight_decay=1e-2)
+    #optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-2)
+    backbone_params = []
+    head_params = []
+    for name, param in full_model.named_parameters():
+        if 'base_model' in name:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    # Optimizer with Differential Learning Rates
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params, 'lr': 0.5e-5}, # 10x smaller for backbone
+        {'params': head_params,     'lr': 1e-5}  # Standard for head
+    ], weight_decay=1e-2)
     
     # Reduce learning rate by half if validation loss stops improving for 2 epochs
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -412,7 +425,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.001)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
