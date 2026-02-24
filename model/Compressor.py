@@ -310,7 +310,7 @@ class MultiLevelCompressor(nn.Module):
         self, 
         hidden_dim=1024, 
         num_stages=2,
-        frames_per_query=[24, 10], 
+        frames_per_query=[24, 10], # 1 minute = token| compress rate = 240
         num_layers_per_stage=2, 
         bidirectional=True, 
         backbone="Mamba2"
