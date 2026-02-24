@@ -124,7 +124,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         # contexts = contexts.to(device)
         labels = labels.to(device)
         # future_labels = future_labels.to(device)
-        # reset_mask = reset_mask.to(device)
+        reset_mask = reset_mask.to(device)
         # context_masks = context_masks.to(device)
         
         # actual_K = context_masks[0].sum().int().item()
@@ -149,7 +149,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         # loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
         
         logits = output.logits
-        ce_loss = safe_ce_loss(logits.view(-1, model.num_classes), labels.view(-1), criterion)
+        ce_loss = safe_ce_loss(logits.view(-1, len(CLASS_MAP)), labels.view(-1), criterion)
         next_states = output.next_states
 
         # --- Custom Temporal Constraints ---
@@ -208,7 +208,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         # contexts = contexts.to(device)
         labels = labels.to(device)
         # future_labels = future_labels.to(device)
-        # reset_mask = reset_mask.to(device)
+        reset_mask = reset_mask.to(device)
         # context_masks = context_masks.to(device)
         
         # actual_K = context_masks[0].sum().int().item()
@@ -231,7 +231,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         # loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
         # loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
         logits = output.logits
-        ce_loss = safe_ce_loss(logits.view(-1, model.num_classes), labels.view(-1), criterion)
+        ce_loss = safe_ce_loss(logits.view(-1, len(CLASS_MAP)), labels.view(-1), criterion)
         next_states = output.next_states
 
         # --- Custom Temporal Constraints ---
@@ -273,7 +273,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
     # Calculate Sklearn Metrics
     val_acc = accuracy_score(all_labels, all_preds) if len(all_labels) > 0 else 0.0
     val_f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0) if len(all_labels) > 0 else 0.0
-    val_f1_per_class = f1_score(all_labels, all_preds, average=None, labels=list(range(model.num_classes)), zero_division=0) if len(all_labels) > 0 else []
+    val_f1_per_class = f1_score(all_labels, all_preds, average=None, labels=list(range(len(CLASS_MAP))), zero_division=0) if len(all_labels) > 0 else []
 
     return avg_loss, val_acc, val_f1_macro, val_f1_per_class
 
@@ -303,7 +303,7 @@ def main():
     g = torch.Generator()
     g.manual_seed(SEED)
     train_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
+        "./cv_folds_generated/fold5_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=4096, # 1 minute so we dont need to deal with edge case where context need to be recalculate
@@ -323,7 +323,7 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
+        "./cv_folds_generated/fold5_test.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=4096, 
@@ -361,7 +361,7 @@ def main():
     patience = 12  # How many epochs to wait for improvement before stopping
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = "./checkpoints/base_shuffle/fold2"
+    save_dir = "./checkpoints/base_shuffle/fold5"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 

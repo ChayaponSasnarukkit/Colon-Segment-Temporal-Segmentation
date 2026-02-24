@@ -14,8 +14,8 @@ class ThumosStreamingDataset(IterableDataset):
                  chunk_size=240,       
                  
                  # Feature Config
-                 feature_folder_rgb="rgb",
-                 feature_folder_flow="flow",
+                 feature_folder_rgb="rgb_kinetics_resnet50",
+                 feature_folder_flow="flow_kinetics_bninception",
                  fps=4.0,              # Source FPS of the extracted features
                  target_fps=4.0,       # Desired Training FPS
                  
@@ -97,7 +97,7 @@ class ThumosStreamingDataset(IterableDataset):
         except (FileNotFoundError, ValueError):
             return torch.zeros(1, self.feature_dim), torch.zeros(1).long(), 1
 
-        target_path = osp.join(self.data_root, 'targets', session_name + '.npy')
+        target_path = osp.join(self.data_root, 'target_perframe', session_name + '.npy')
         if osp.exists(target_path):
             targets = np.load(target_path)
             if self.return_indices:
@@ -127,14 +127,25 @@ class ThumosStreamingDataset(IterableDataset):
                 targets = torch.cat([targets, pad], dim=0)
 
         return features, targets, total_frames
-
     def __len__(self):
-        # Approximate length for tqdm
-        # Assuming avg 2000 frames per video
-        total_frames = len(self.sessions) * 2000 
-        total_steps = total_frames // (self.chunk_size * self.step)
-        return max(1, total_steps // self.batch_size)
-
+        """
+        Estimates the number of batches per epoch.
+        """
+        EST_FRAMES_PER_VIDEO = 2000  
+        
+        # Calculate total estimated frames
+        total_frames = len(self.sessions) * EST_FRAMES_PER_VIDEO
+        
+        # Calculate frames consumed per batch step
+        frames_per_batch_element = self.chunk_size * self.step
+        
+        # Total chunks available
+        total_chunks = total_frames // frames_per_batch_element
+        
+        # Adjust for batch size
+        length = total_chunks // self.batch_size
+        
+        return max(1, length)
     def __iter__(self):
         worker_info = get_worker_info()
         all_indices = list(range(len(self.sessions)))

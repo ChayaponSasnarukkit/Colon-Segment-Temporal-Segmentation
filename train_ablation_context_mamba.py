@@ -103,7 +103,7 @@ def safe_ce_loss(logits, targets, criterion):
     return criterion(logits, targets)
 
 from train_mamba import f1_based_weights, compute_class_weights
-USE_CMERT_HEAD = False
+USE_CMERT_HEAD = True
 USE_TEMPORAL_SCALE = False
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True):
@@ -322,7 +322,7 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
     
     os.environ['PYTHONHASHSEED'] = str(seed)
-    print(f"Global seed set to {seed}")
+    print(f"Global seed set to {seed}", flush=True)
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
@@ -336,7 +336,7 @@ def main():
     g.manual_seed(SEED)
     freeze = True
     train_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
+        "./cv_folds_generated/fold5_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, # 1 minute so we dont need to deal with edge case where context need to be recalculate
@@ -356,7 +356,7 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
+        "./cv_folds_generated/fold5_test.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, 
@@ -389,7 +389,7 @@ def main():
     )
     
     # 4. Load the Model Weights
-    checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
+    checkpoint_path = "./checkpoints/base_shuffle/fold5/best_mamba_model.pth"
     print(f"Loading weights from {checkpoint_path}...")
     model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     model.to(device)
@@ -406,9 +406,9 @@ def main():
     patience = 12  # How many epochs to wait for improvement before stopping
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = "./checkpoints/full_shuffle"
+    save_dir = "./checkpoints/full_shuffle/fold5"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "our_no_temp_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "our_with_mem_cmert_anti_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers

@@ -298,7 +298,7 @@ def main():
     g.manual_seed(SEED)
     freeze = True
     train_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
+        "./cv_folds_generated/fold4_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, # 1 minute so we dont need to deal with edge case where context need to be recalculate
@@ -318,7 +318,7 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
+        "./cv_folds_generated/fold4_test.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, 
@@ -351,7 +351,7 @@ def main():
     )
     
     # 4. Load the Model Weights
-    checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
+    checkpoint_path = "./checkpoints/base_shuffle/fold4/best_mamba_model.pth"
     print(f"Loading weights from {checkpoint_path}...")
     model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     model.to(device)
@@ -365,9 +365,9 @@ def main():
     patience = 12  # How many epochs to wait for improvement before stopping
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = "./checkpoints/full_shuffle"
+    save_dir = "./checkpoints/full_shuffle/fold4"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "short_nojump_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "full_pipeline_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers

@@ -40,7 +40,7 @@ class ContextMamba(nn.Module):
         #     **factory_kwargs
         # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressor()
+        self.compressor = MultiLevelCompressor(hidden_dim=d_model)
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # Anticipation: predict the next num_future second ahead using context and current
@@ -386,7 +386,7 @@ class ContextMambaCmeRT(nn.Module):
         
         return dt_s, dt_q
 
-    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None):
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
         """
         Args:
             ablation_cmert_style (bool): If True, uses CMeRT-style anticipation 

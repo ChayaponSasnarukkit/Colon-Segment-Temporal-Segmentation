@@ -8,7 +8,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import average_precision_score
 import json
-
+from dataclasses import dataclass, field
 # --- IMPORTS FROM YOUR FILES ---
 # Assuming your model files are in the path or same directory
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
@@ -122,15 +122,32 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
             labels=labels 
         )
         
-        # Loss Calculation
-        loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
-        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)
-        loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
-        
-        ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
-        smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-        jump_loss = transition_penalty_loss(logits_w_future, labels)
-        
+        if with_future:
+
+            # --- Multi-Objective CrossEntropy Losses ---
+            loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+            loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
+
+            if isinstance(model, ContextMambaCmeRT):
+                # only use the last one
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion)
+            else:
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+
+            ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
+
+            # --- Custom Temporal Constraints ---
+            # Apply constraints to the final, most refined predictions (logits_w_future)
+            smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
+            jump_loss = transition_penalty_loss(logits_w_future, labels)
+        else:
+            # If no future, just ignore future and with_future logits.
+            # Optimize using only logits_wo_future
+            ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+            #loss_wo = ce_loss
+            smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
+            jump_loss = transition_penalty_loss(logits_w_future, labels)
+
         loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
         loss = loss / accumulation_steps
         
@@ -143,6 +160,10 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         worker_states[w_id] = detach_states(next_states)
         total_loss += (loss.item() * accumulation_steps)
         steps += 1
+
+        if step % 10 == 0:
+            print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
+                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, Jump: {jump_loss.item():.4f})")
             
     return total_loss / (steps if steps > 0 else 1)
 
@@ -185,14 +206,16 @@ def validate_map(model, dataloader, device, num_classes):
             current_states = apply_reset_mask(current_states, reset_mask)
 
         # Forward
-        _, _, logits_w_future, next_states = model(
+        logits_wo_future, _, logits_w_future, next_states = model(
             vision_embeddings=vision_embeddings, 
             contexts=valid_contexts,
             pass_states=current_states,
             labels=labels 
         )
-        
-        loss = safe_ce_loss(logits_w_future.view(-1, num_classes), labels.view(-1), criterion)
+        if with_future:
+            loss = safe_ce_loss(logits_w_future.view(-1, num_classes), labels.view(-1), criterion)
+        else:
+            loss = safe_ce_loss(logits_wo_future.view(-1, num_classes), labels.view(-1), criterion)
         total_loss += loss.item()
         steps += 1
         worker_states[w_id] = detach_states(next_states)
@@ -260,20 +283,20 @@ def main():
     g.manual_seed(SEED)
     
     # 1. Load JSON (contains session definitions)
-    with open("thumos_annotations.json", 'r') as f:
+    with open("thumos.json", 'r') as f:
         json_data = json.load(f)
 
     # 2. Datasets (Using the Fixed ThumosStreamingDataset)
     train_dataset = ThumosStreamingDataset(
-        data_root="/path/to/thumos/features",
+        data_root=json_data.get("data_root", ""),
         json_data=json_data,
         batch_size_per_worker=1,
         
-        chunk_size=240,
+        chunk_size=2048,
         fps=4.0, target_fps=4.0,
         
         # Matching Medical Logic
-        use_memory_bank=True,
+        use_memory_bank=False,
         context_seconds=600,
         context_fps=4,
         
@@ -281,14 +304,14 @@ def main():
     )
 
     val_dataset = ThumosStreamingDataset(
-        data_root="/path/to/thumos/features",
+        data_root=json_data.get("data_root", ""),
         json_data=json_data,
         batch_size_per_worker=1, # Val usually safer with 1
         
         chunk_size=240,
         fps=4.0, target_fps=4.0,
         
-        use_memory_bank=True,
+        use_memory_bank=False,
         context_seconds=600,
         context_fps=4,
         
@@ -300,7 +323,7 @@ def main():
     # 3. Model Setup
     # Thumos features (concatenated RGB+Flow) are usually 2048 dims (1024+1024)
     # Check your feature files! If purely RGB, change to 1024.
-    VISION_DIM = 4096 
+    VISION_DIM = train_dataset._detect_feature_dim() 
     
     config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
@@ -325,9 +348,29 @@ def main():
 
     # 4. Training
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3) # Monitor mAP (max)
+    WARMUP_EPOCHS = 5
+    MAX_EPOCHS = 50 # Must match your training loop epochs
+    
+    # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
+    scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=WARMUP_EPOCHS
+    )
+    
+    # Phase 2: Cosine Decay (decay from 100% to eta_min over remaining epochs)
+    scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(MAX_EPOCHS - WARMUP_EPOCHS), eta_min=1e-6
+    )
+    
+    # Combine them sequentially
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, 
+        schedulers=[scheduler_warmup, scheduler_cosine], 
+        milestones=[WARMUP_EPOCHS]
+    )
+    # ---------------------------
 
-    epochs = 50
+    epochs = MAX_EPOCHS
+
     best_map = 0.0
     
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
@@ -338,10 +381,10 @@ def main():
         # Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False)
         
         # Validate (mAP)
-        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES)
+        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False)
         
         print(f"Summary:")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -349,12 +392,15 @@ def main():
         print(f"  Val mAP:    {val_map:.4f}")
         
         # Scheduler Step (Monitor mAP, so 'max')
-        scheduler.step(val_map)
+        scheduler.step()
+
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"  Current LR: {current_lr:.6f}")
         
         if val_map > best_map:
             best_map = val_map
             print(f"New Best mAP! Saving...")
-            torch.save(full_model.state_dict(), "best_thumos_mamba.pth")
+            torch.save(full_model.state_dict(), "base_thumos_mamba.pth")
 
 if __name__ == "__main__":
     main()

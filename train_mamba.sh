@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p gpu                  # Specify partition [Compute/Memory/GPU]
+#SBATCH -p gpu-devel                  # Specify partition [Compute/Memory/GPU]
 #SBATCH -N 1 -c 16
 #SBATCH --ntasks-per-node=1   # 4 tasks
 #SBATCH --gpus-per-node=1     # 4 GPUs total on the node
@@ -34,4 +34,4 @@ export LD_LIBRARY_PATH=$TORCH_LIB:/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12
 # We explicitly exclude libtorch_python.so to avoid the symbol error.
 export LD_PRELOAD=$TORCH_LIB/libc10.so:$TORCH_LIB/libtorch.so:$TORCH_LIB/libtorch_cuda.so
 # 4. Run the training (Pass all variables)
-srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_ablation_context_mamba.py
+srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_thumos.py
