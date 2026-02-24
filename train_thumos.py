@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 # --- IMPORTS FROM YOUR FILES ---
 # Assuming your model files are in the path or same directory
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMamba
+from model.ContextMamba import ContextMamba, ContextMambaCmeRT
+from metrics import perframe_average_precision
 from dataset.thumos import ThumosStreamingDataset # Assuming you saved the fixed dataset here
 
 # --- CONFIG ---
@@ -67,21 +68,22 @@ class TransitionPenaltyLoss(nn.Module):
         if not valid_mask.any(): return torch.tensor(0.0, device=logits.device)
         return expected_penalty[valid_mask].mean()
 
-def safe_ce_loss(logits, targets, criterion):
-    if (targets != -100).sum() == 0:
+def safe_ce_loss(logits, targets, criterion, ignore_index=-100):
+    if (targets != ignore_index).sum() == 0:
         return logits.sum() * 0.0 
     return criterion(logits, targets)
 
 # --- TRAINING LOOP ---
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
-                    lambda_smooth=0.5, lambda_jump=0.0):
+                    lambda_smooth=0.5, lambda_jump=0.0, with_future=True, ignore_index=-100):
     model.train()
     total_loss = 0.0
     steps = 0
     worker_states = {}
     
     # Standard CE for Thumos (You can calculate class weights if needed)
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    print("ignore index", ignore_index)
+    criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     transition_penalty_loss = TransitionPenaltyLoss(num_classes=model.num_classes).to(device)
 
     optimizer.zero_grad() 
@@ -125,14 +127,14 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         if with_future:
 
             # --- Multi-Objective CrossEntropy Losses ---
-            loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
-            loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
+            loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
+            loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
 
             if isinstance(model, ContextMambaCmeRT):
                 # only use the last one
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion)
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion, ignore_index=ignore_index)
             else:
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion, ignore_index=ignore_index)
 
             ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
 
@@ -143,7 +145,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         else:
             # If no future, just ignore future and with_future logits.
             # Optimize using only logits_wo_future
-            ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+            ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
             #loss_wo = ce_loss
             smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
             jump_loss = transition_penalty_loss(logits_w_future, labels)
@@ -169,7 +171,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
 
 # --- VALIDATION WITH MAP ---
 @torch.no_grad()
-def validate_map(model, dataloader, device, num_classes):
+def validate_map(model, dataloader, device, num_classes, with_future=True, ignore_index=-100):
     """
     Computes Frame-level mAP (Mean Average Precision).
     This is a strong proxy for the official Thumos Instance-mAP during training.
@@ -213,9 +215,9 @@ def validate_map(model, dataloader, device, num_classes):
             labels=labels 
         )
         if with_future:
-            loss = safe_ce_loss(logits_w_future.view(-1, num_classes), labels.view(-1), criterion)
+            loss = safe_ce_loss(logits_w_future.view(-1, num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
         else:
-            loss = safe_ce_loss(logits_wo_future.view(-1, num_classes), labels.view(-1), criterion)
+            loss = safe_ce_loss(logits_wo_future.view(-1, num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
         total_loss += loss.item()
         steps += 1
         worker_states[w_id] = detach_states(next_states)
@@ -228,11 +230,11 @@ def validate_map(model, dataloader, device, num_classes):
         labels_flat = labels.view(-1).cpu().numpy()
         
         # Filter padding
-        valid_idx = labels_flat != -100
+        valid_mask = (labels_flat != ignore_index) & (labels_flat < num_classes) & (labels_flat >= 0)
         
-        if valid_idx.sum() > 0:
-            valid_probs = probs_flat[valid_idx]
-            valid_labels = labels_flat[valid_idx]
+        if valid_mask.sum() > 0:
+            valid_probs = probs_flat[valid_mask]
+            valid_labels = labels_flat[valid_mask]
             
             # Convert targets to One-Hot for mAP calculation
             # We assume labels are 0..C-1. 
@@ -249,19 +251,25 @@ def validate_map(model, dataloader, device, num_classes):
     # Concatenate all batches
     if len(all_scores) == 0: return 0.0, 0.0
     
-    all_scores = np.concatenate(all_scores, axis=0)
-    all_targets = np.concatenate(all_targets, axis=0)
+    ground_truth = np.concatenate(all_targets, axis=0)
+    prediction = np.concatenate(all_scores, axis=0)
 
-    # Compute mAP (Macro Average)
-    # Note: Thumos usually cares about classes 1-20 (if 0 is BG). 
-    # If your classes are 0-19 (actions) and 20 (BG), slice accordingly.
-    # Here we compute for ALL classes first.
-    map_per_class = average_precision_score(all_targets, all_scores, average=None)
+    if class_names is None:
+        class_names = [str(i) for i in range(num_classes)]
+
+    # 4. Call the SOTA Metric Function
+    # We pass ignore_index=0 to ignore "Background" in the mAP averaging (standard Thumos protocol).
+    # Note: We do NOT pass 21 here, because we already filtered 21 out of the rows above.
+    results = perframe_average_precision(
+        ground_truth=ground_truth,
+        prediction=prediction,
+        class_names=class_names,
+        ignore_index=ignore_index,  # Ignore Background class column
+        metrics='AP',
+        postprocessing=None 
+    )
     
-    # Simple Macro mAP
-    mAP_macro = np.mean(map_per_class)
-    
-    return total_loss / steps, mAP_macro
+    return total_loss / steps, results['mean_AP']
 
 # --- UTILS ---
 def set_seed(seed=42):
