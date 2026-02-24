@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
 from dataset.cas_locationv3 import MedicalStreamingDataset, CLASS_MAP
-from model.ContextMamba import ContextMamba
+from model.ContextMamba import ContextMamba, ContextMambaCmeRT
 @dataclass
 class MambaTemporalConfig:
     # --- Architecture Scale ---
@@ -103,6 +103,7 @@ def safe_ce_loss(logits, targets, criterion):
     return criterion(logits, targets)
 
 from train_mamba import f1_based_weights, compute_class_weights
+USE_CMERT_HEAD = True
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True):
     model.train()
@@ -148,7 +149,12 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
             # --- Multi-Objective CrossEntropy Losses ---
             loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
             loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
-            loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+            
+            if isinstance(model, ContextMambaCmeRT):
+                # only use the last one
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[-1].view(-1), criterion)
+            else:
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
         
             ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
 
@@ -236,8 +242,14 @@ def validate(model, dataloader, device, transition_penalty_loss,
         )
         
         # Losses
-        if with_future:                                                                                                                                                                                                                                     # --- Multi-Objective CrossEntropy Losses ---                                                                           loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)                        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
-            loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+        if with_future:
+            loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+            loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)                                                                                                                                                                                                                    # --- Multi-Objective CrossEntropy Losses ---                                                                           loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)                        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
+            if isinstance(model, ContextMambaCmeRT):
+                # only use the last one
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[-1].view(-1), criterion)
+            else:
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
 
             ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
 
@@ -382,7 +394,10 @@ def main():
         for param in model.parameters():
             param.requires_grad = False
     
-    full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
+    if USE_CMERT_HEAD:
+        full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
+    else:
+        full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
     # --- Training Configuration ---
     epochs = 50
     patience = 12  # How many epochs to wait for improvement before stopping
@@ -390,7 +405,7 @@ def main():
     best_val_loss = float('inf')
     save_dir = "./checkpoints/full_shuffle"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "no_future_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "future_cmert_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -411,10 +426,10 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0, with_future=False)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0, with_future=True)
         
         # 2. Validate (Now receiving metrics)
-        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=False)
+        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)
         
         # 3. Print Summary
         print(f"Epoch {epoch+1} Summary:")
