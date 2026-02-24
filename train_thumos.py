@@ -389,10 +389,10 @@ def main():
         # Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False, ignore_index=json_data.get('ignore_index', -100))
         
         # Validate (mAP)
-        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False)
+        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False, ignore_index=json_data.get('ignore_index', -100))
         
         print(f"Summary:")
         print(f"  Train Loss: {train_loss:.4f}")
