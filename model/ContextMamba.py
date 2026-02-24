@@ -112,7 +112,7 @@ class ContextMamba(nn.Module):
         
         return dt_s, dt_q
 
-    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None):
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
         device = vision_embeddings.device
         dtype = vision_embeddings.dtype
 
@@ -167,7 +167,10 @@ class ContextMamba(nn.Module):
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
             
             # Output shape: [B, K+M, num_future, D]
-            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
             # We only want the anticipation corresponding to the M current query steps.
             # We discard the predictions made over the K context prefix.
             future_token = future_token[:, K:, :, :] # [B, M, num_future, D]

@@ -103,7 +103,8 @@ def safe_ce_loss(logits, targets, criterion):
     return criterion(logits, targets)
 
 from train_mamba import f1_based_weights, compute_class_weights
-USE_CMERT_HEAD = True
+USE_CMERT_HEAD = False
+USE_TEMPORAL_SCALE = False
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True):
     model.train()
@@ -141,7 +142,8 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
             vision_embeddings=vision_embeddings, 
             contexts=valid_contexts,
             pass_states=current_states,
-            labels=labels 
+            labels=labels,
+            use_temporal_scale=USE_TEMPORAL_SCALE
         )
         
         if with_future:
@@ -152,7 +154,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
             
             if isinstance(model, ContextMambaCmeRT):
                 # only use the last one
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[-1].view(-1), criterion)
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion)
             else:
                 loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
         
@@ -238,7 +240,8 @@ def validate(model, dataloader, device, transition_penalty_loss,
             vision_embeddings=vision_embeddings, 
             contexts=valid_contexts,
             pass_states=current_states,
-            labels=labels 
+            labels=labels,
+            use_temporal_scale=USE_TEMPORAL_SCALE
         )
         
         # Losses
@@ -247,7 +250,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
             loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)                                                                                                                                                                                                                    # --- Multi-Objective CrossEntropy Losses ---                                                                           loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)                        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
             if isinstance(model, ContextMambaCmeRT):
                 # only use the last one
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[-1].view(-1), criterion)
+                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion)
             else:
                 loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
 
@@ -405,7 +408,7 @@ def main():
     best_val_loss = float('inf')
     save_dir = "./checkpoints/full_shuffle"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "future_cmert_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "our_no_temp_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers

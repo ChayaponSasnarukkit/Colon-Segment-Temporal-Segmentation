@@ -269,7 +269,7 @@ def main():
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=60,     # Desired Training FPS (New Argument)
+        target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
@@ -289,7 +289,7 @@ def main():
         
         # FPS Configuration
         fps=60,            # Source Video FPS
-        target_fps=60,     # Desired Training FPS (New Argument)
+        target_fps=30,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=False,
