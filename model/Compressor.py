@@ -354,6 +354,8 @@ class MultiLevelCompressor(nn.Module):
         apply_depth_scaled_init(self, total_layers)
 
     def forward(self, x):
+        if x is None:
+            return None # Exit early if context is dropped
         for i in range(self.num_stages-1):
             x = self.stages[i](x)
             if x is None:

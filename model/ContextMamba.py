@@ -16,6 +16,7 @@ class ContextMamba(nn.Module):
         context_fps: float = 4.0,
         query_fps: float = 30.0,
         dropout: float = 0.1,
+        future_fps: float = None,
         **factory_kwargs
     ):
         super().__init__()
@@ -28,6 +29,10 @@ class ContextMamba(nn.Module):
         self.context_fps = context_fps
         self.query_fps = query_fps
 
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
         # Sub-modules
         # self.base_model = MixerModel(
         #     d_model=config.d_model,
@@ -139,7 +144,7 @@ class ContextMamba(nn.Module):
             enhanced_embeddings = x # no fusion needed since compress_context is empty
             full_history = enhanced_embeddings # [B, K+M, D] since K=0, full_history = enhanced_embeddings
             full_dt_s = dt_q # [B, K+M, 1] since K=0, full_dt_s = dt_q
-            dt_q_val = self.target_fps / (self.compression_ratio * (self.target_fps / self.context_fps))
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
             future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q) # no need to slice K since K=0
             future_token_q = future_token # [B, M, num_future, D]
@@ -163,7 +168,7 @@ class ContextMamba(nn.Module):
             full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             # [B, K+M, 1]
             
             # Fix: Create a properly shaped tensor for the future queries [B, num_future, 1]
-            dt_q_val = self.target_fps / (self.compression_ratio * (self.target_fps / self.context_fps))
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
             
             # Output shape: [B, K+M, num_future, D]

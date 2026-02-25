@@ -38,6 +38,33 @@ class MambaTemporalConfig:
     fused_add_norm: bool = True
     residual_in_fp32: bool = True
 
+class_names = [
+      "Background",
+      "BaseballPitch",
+      "BasketballDunk",
+      "Billiards",
+      "CleanAndJerk",
+      "CliffDiving",
+      "CricketBowling",
+      "CricketShot",
+      "Diving",
+      "FrisbeeCatch",
+      "GolfSwing",
+      "HammerThrow",
+      "HighJump",
+      "JavelinThrow",
+      "LongJump",
+      "PoleVault",
+      "Shotput",
+      "SoccerPenalty",
+      "TennisSwing",
+      "ThrowDiscus",
+      "VolleyballSpiking",
+      "Ambiguous"
+    ]
+
+from weight_cal import weights
+
 # --- LOSS FUNCTIONS (Kept yours, they are good) ---
 def compute_temporal_smoothing_loss(logits, labels, ignore_index=-100):
     probs = F.softmax(logits, dim=-1)
@@ -74,7 +101,7 @@ def safe_ce_loss(logits, targets, criterion, ignore_index=-100):
     return criterion(logits, targets)
 
 # --- TRAINING LOOP ---
-def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
+def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True, ignore_index=-100):
     model.train()
     total_loss = 0.0
@@ -83,7 +110,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
     
     # Standard CE for Thumos (You can calculate class weights if needed)
     print("ignore index", ignore_index)
-    criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+    criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
     transition_penalty_loss = TransitionPenaltyLoss(num_classes=model.num_classes).to(device)
 
     optimizer.zero_grad() 
@@ -136,7 +163,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
             else:
                 loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion, ignore_index=ignore_index)
 
-            ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
+            ce_loss = (0.15*loss_wo + loss_w + 0.4*loss_future)
 
             # --- Custom Temporal Constraints ---
             # Apply constraints to the final, most refined predictions (logits_w_future)
@@ -174,8 +201,33 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
 def validate_map(model, dataloader, device, num_classes, with_future=True, ignore_index=-100):
     """
     Computes Frame-level mAP (Mean Average Precision).
-    This is a strong proxy for the official Thumos Instance-mAP during training.
-    """
+    This is a strong proxy for the official Thumos Instance-mAP during training."""
+    class_names = [
+      "Background",
+      "BaseballPitch",
+      "BasketballDunk",
+      "Billiards",
+      "CleanAndJerk",
+      "CliffDiving",
+      "CricketBowling",
+      "CricketShot",
+      "Diving",
+      "FrisbeeCatch",
+      "GolfSwing",
+      "HammerThrow",
+      "HighJump",
+      "JavelinThrow",
+      "LongJump",
+      "PoleVault",
+      "Shotput",
+      "SoccerPenalty",
+      "TennisSwing",
+      "ThrowDiscus",
+      "VolleyballSpiking",
+      "Ambiguous"
+    ]
+
+
     model.eval()
     worker_states = {}
     
@@ -185,7 +237,7 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
     
     total_loss = 0.0
     steps = 0
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
 
     for step, batch in enumerate(tqdm(dataloader, desc="Validating (mAP)")):
         vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
@@ -223,7 +275,10 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
         worker_states[w_id] = detach_states(next_states)
 
         # --- DATA GATHERING FOR MAP ---
-        probs = F.softmax(logits_w_future, dim=-1) # [B, M, C]
+        if with_future:
+            probs = F.softmax(logits_w_future, dim=-1) # [B, M, C]
+        else:
+            probs = F.softmax(logits_wo_future, dim=-1)
         
         # Flatten
         probs_flat = probs.view(-1, num_classes).cpu().numpy()
@@ -253,7 +308,6 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
     
     ground_truth = np.concatenate(all_targets, axis=0)
     prediction = np.concatenate(all_scores, axis=0)
-
     if class_names is None:
         class_names = [str(i) for i in range(num_classes)]
 
@@ -273,6 +327,7 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
 
 # --- UTILS ---
 def set_seed(seed=42):
+    print("SEED", seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -284,8 +339,10 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+SEED = random.randint(0, 9876)
 # --- MAIN ---
 def main():
+    freeze = False
     set_seed(SEED)
     g = torch.Generator()
     g.manual_seed(SEED)
@@ -300,13 +357,15 @@ def main():
         json_data=json_data,
         batch_size_per_worker=1,
         
-        chunk_size=2048,
+        chunk_size=240,
         fps=4.0, target_fps=4.0,
         
         # Matching Medical Logic
-        use_memory_bank=False,
-        context_seconds=600,
+        use_memory_bank=True,
+        context_seconds=256,
         context_fps=4,
+        num_future=12,
+        future_step=1, # future_fps=target_fps
         
         phase='train', shuffle=True
     )
@@ -319,9 +378,11 @@ def main():
         chunk_size=240,
         fps=4.0, target_fps=4.0,
         
-        use_memory_bank=False,
-        context_seconds=600,
+        use_memory_bank=True,
+        context_seconds=256,
         context_fps=4,
+        num_future=12,
+        future_step=1, # future_fps=target_fps
         
         phase='test', shuffle=False
     )
@@ -333,7 +394,7 @@ def main():
     # Check your feature files! If purely RGB, change to 1024.
     VISION_DIM = train_dataset._detect_feature_dim() 
     
-    config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=8)
+    config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=10)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
@@ -351,13 +412,29 @@ def main():
         target_fps=4.0,
         context_fps=4.0,
         query_fps=4.0,
-        num_future=3
+        num_future=12,
+        future_fps=4.0,
     ).to(device)
+
+    print(full_model)
+    base_d_state = full_model.base_model.layers[0].mixer.d_state
+    print(f"Base Model d_state: {base_d_state}")
+
+    #checkpoint_path = "/scratch/lt200353-pcllm/base_short_thumos_mamba_0.6387.pth"
+    #print(f"Loading weights from {checkpoint_path}...")
+
+    # Load directly into full_model since this checkpoint includes the wrapper and backbone
+    #state_dict = torch.load(checkpoint_path, map_location=device)
+    #full_model.load_state_dict(state_dict)
+
+    if freeze==True:
+        for param in full_model.base_model.parameters():
+            param.requires_grad = False
 
     # 4. Training
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-3)
     WARMUP_EPOCHS = 5
-    MAX_EPOCHS = 50 # Must match your training loop epochs
+    MAX_EPOCHS = 25 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -388,11 +465,11 @@ def main():
         
         # Train
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False, ignore_index=json_data.get('ignore_index', -100))
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=16, worker_init_fn=seed_worker, generator=g)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=True, ignore_index=json_data.get('ignore_index', -100), lambda_smooth=0.0)
         
         # Validate (mAP)
-        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False, ignore_index=json_data.get('ignore_index', -100))
+        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=True, ignore_index=json_data.get('ignore_index', -100))
         
         print(f"Summary:")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -408,7 +485,7 @@ def main():
         if val_map > best_map:
             best_map = val_map
             print(f"New Best mAP! Saving...")
-            torch.save(full_model.state_dict(), "base_thumos_mamba.pth")
+            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/joint_pretrain_short_thumos_mamba_{val_map:.4f}.pth")
 
 if __name__ == "__main__":
     main()
