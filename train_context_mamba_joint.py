@@ -351,16 +351,16 @@ def main():
     )
     
     # 4. Load the Model Weights
-    checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
-    print(f"Loading weights from {checkpoint_path}...")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+    # checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
+    # print(f"Loading weights from {checkpoint_path}...")
+    # model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     model.to(device)
     # if freeze==True:
     #     for param in model.parameters():
     #         param.requires_grad = False
     
     full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
-    checkpoint_path = "checkpoints/full_shuffle/no_jimp_repeat2_best_mamba_model.pth"
+    checkpoint_path = "/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold2/full_pipeline_best_mamba_model.pth"
     print(f"Loading weights from {checkpoint_path}...")
     
     # Load directly into full_model since this checkpoint includes the wrapper and backbone
@@ -401,9 +401,28 @@ def main():
     ], weight_decay=1e-2)
     
     # Reduce learning rate by half if validation loss stops improving for 2 epochs
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2
+    WARMUP_EPOCHS = 5
+    MAX_EPOCHS = 25 # Must match your training loop epochs
+    
+    # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
+    scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=WARMUP_EPOCHS
     )
+    
+    # Phase 2: Cosine Decay (decay from 100% to eta_min over remaining epochs)
+    scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(MAX_EPOCHS - WARMUP_EPOCHS), eta_min=1e-6
+    )
+    
+    # Combine them sequentially
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, 
+        schedulers=[scheduler_warmup, scheduler_cosine], 
+        milestones=[WARMUP_EPOCHS]
+    )
+    # ---------------------------
+
+    epochs = MAX_EPOCHS
 
     # --- Main Training Loop ---
     IDX_TO_CLASS = {v: k for k, v in CLASS_MAP.items()}
@@ -425,7 +444,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.001)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
@@ -445,7 +464,10 @@ def main():
             print(f"    - {class_name:<15}: {f1:.4f}")
         
         # 4. Step the scheduler based on validation loss
-        scheduler.step(val_loss)
+        scheduler.step()
+
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"  Current LR: {current_lr:.6f}")
         
         # 5. Save Model & Early Stopping Logic
         # (You might want to change early stopping to track val_f1_macro instead of val_loss!)
