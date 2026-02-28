@@ -296,9 +296,10 @@ def main():
     set_seed()
     g = torch.Generator()
     g.manual_seed(SEED)
+    FOLD = 3
     # freeze = True
     train_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv", 
+        f"./cv_folds_generated/fold{FOLD}_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, # 1 minute so we dont need to deal with edge case where context need to be recalculate
@@ -318,7 +319,7 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        "/scratch/lt200353-pcllm/location/cas_colon/updated_test_split.csv", 
+        f"./cv_folds_generated/fold{FOLD}_test.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
         1, 
         chunk_size=1800, 
@@ -360,7 +361,7 @@ def main():
     #         param.requires_grad = False
     
     full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
-    checkpoint_path = "/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold2/full_pipeline_best_mamba_model.pth"
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/full_pipeline_best_mamba_model.pth"
     print(f"Loading weights from {checkpoint_path}...")
     
     # Load directly into full_model since this checkpoint includes the wrapper and backbone
@@ -374,14 +375,14 @@ def main():
 
     # --- Training Configuration ---
     epochs = 50
-    patience = 12 
+    patience = 50 
     patience_counter = 0
     best_val_loss = float('inf')
     
     # Save path for the new joint-training run
-    save_dir = "./checkpoints/full_shuffle_joint" 
+    save_dir = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "joint_opt_s_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "2joint_opt_s_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -396,13 +397,13 @@ def main():
 
     # Optimizer with Differential Learning Rates
     optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': 0.5e-5}, # 10x smaller for backbone
-        {'params': head_params,     'lr': 1e-5}  # Standard for head
-    ], weight_decay=1e-2)
+        {'params': backbone_params, 'lr': 5e-5}, # 10x smaller for backbone
+        {'params': head_params,     'lr': 5e-5}  # Standard for head
+    ], weight_decay=1e-3)
     
     # Reduce learning rate by half if validation loss stops improving for 2 epochs
-    WARMUP_EPOCHS = 5
-    MAX_EPOCHS = 25 # Must match your training loop epochs
+    WARMUP_EPOCHS = 10
+    MAX_EPOCHS = 50 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -443,8 +444,8 @@ def main():
         
         # 1. Train
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0)
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.25, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)

@@ -196,6 +196,32 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
             
     return total_loss / (steps if steps > 0 else 1)
 
+def thumos_postprocessing(ground_truth, prediction, smooth=False, switch=False):
+    """
+    We follow (Shou et al., 2017) and adopt their perframe postprocessing method on THUMOS'14 datset.
+    Source: https://bitbucket.org/columbiadvmm/cdc/src/master/THUMOS14/eval/PreFrameLabeling/compute_framelevel_mAP.m
+    """
+
+    # Simple temporal smoothing via NMS of 5-frames window
+    if smooth:
+        prob = np.copy(prediction)
+        prob1 = prob.reshape(1, prob.shape[0], prob.shape[1])
+        prob2 = np.append(prob[0, :].reshape(1, -1), prob[0: -1, :], axis=0).reshape(1, prob.shape[0], prob.shape[1])
+        prob3 = np.append(prob[1:, :], prob[-1, :].reshape(1, -1), axis=0).reshape(1, prob.shape[0], prob.shape[1])
+        prob4 = np.append(prob[0: 2, :], prob[0: -2, :], axis=0).reshape(1, prob.shape[0], prob.shape[1])
+        prob5 = np.append(prob[2:, :], prob[-2:, :], axis=0).reshape(1, prob.shape[0], prob.shape[1])
+        probsmooth = np.squeeze(np.max(np.concatenate((prob1, prob2, prob3, prob4, prob5), axis=0), axis=0))
+        prediction = np.copy(probsmooth)
+
+    # Assign cliff diving (5) as diving (8)
+    if switch:
+        switch_index = np.where(prediction[:, 5] > prediction[:, 8])[0]
+        prediction[switch_index, 8] = prediction[switch_index, 5]
+
+    # Remove ambiguous (21)
+    valid_index = np.where(ground_truth[:, 21] != 1)[0]
+
+    return ground_truth[valid_index], prediction[valid_index]
 # --- VALIDATION WITH MAP ---
 @torch.no_grad()
 def validate_map(model, dataloader, device, num_classes, with_future=True, ignore_index=-100):
@@ -320,7 +346,7 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
         class_names=class_names,
         ignore_index=ignore_index,  # Ignore Background class column
         metrics='AP',
-        postprocessing=None 
+        postprocessing=thumos_postprocessing 
     )
     
     return total_loss / steps, results['mean_AP']
@@ -357,15 +383,15 @@ def main():
         json_data=json_data,
         batch_size_per_worker=1,
         
-        chunk_size=240,
+        chunk_size=32,
         fps=4.0, target_fps=4.0,
         
         # Matching Medical Logic
         use_memory_bank=True,
         context_seconds=256,
         context_fps=4,
-        num_future=12,
-        future_step=1, # future_fps=target_fps
+        num_future=4,
+        future_step=4, # future_fps=target_fps
         
         phase='train', shuffle=True
     )
@@ -375,14 +401,14 @@ def main():
         json_data=json_data,
         batch_size_per_worker=1, # Val usually safer with 1
         
-        chunk_size=240,
+        chunk_size=32,
         fps=4.0, target_fps=4.0,
         
         use_memory_bank=True,
         context_seconds=256,
         context_fps=4,
-        num_future=12,
-        future_step=1, # future_fps=target_fps
+        num_future=4,
+        future_step=4, # future_fps=target_fps
         
         phase='test', shuffle=False
     )
@@ -394,7 +420,7 @@ def main():
     # Check your feature files! If purely RGB, change to 1024.
     VISION_DIM = train_dataset._detect_feature_dim() 
     
-    config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=10)
+    config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
@@ -412,20 +438,20 @@ def main():
         target_fps=4.0,
         context_fps=4.0,
         query_fps=4.0,
-        num_future=12,
-        future_fps=4.0,
+        num_future=4,
+        future_fps=1.0,
     ).to(device)
 
     print(full_model)
     base_d_state = full_model.base_model.layers[0].mixer.d_state
     print(f"Base Model d_state: {base_d_state}")
 
-    #checkpoint_path = "/scratch/lt200353-pcllm/base_short_thumos_mamba_0.6387.pth"
+    checkpoint_path = "/scratch/lt200353-pcllm/long_future_joint_thumos_mamba_0.6988.pth"
     #print(f"Loading weights from {checkpoint_path}...")
 
     # Load directly into full_model since this checkpoint includes the wrapper and backbone
-    #state_dict = torch.load(checkpoint_path, map_location=device)
-    #full_model.load_state_dict(state_dict)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    full_model.load_state_dict(state_dict)
 
     if freeze==True:
         for param in full_model.base_model.parameters():
@@ -433,8 +459,8 @@ def main():
 
     # 4. Training
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-3)
-    WARMUP_EPOCHS = 5
-    MAX_EPOCHS = 25 # Must match your training loop epochs
+    WARMUP_EPOCHS = 10 
+    MAX_EPOCHS = 50 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -459,7 +485,8 @@ def main():
     best_map = 0.0
     
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
-
+    val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=True, ignore_index=json_data.get('ignore_index', -100))
+    print(val_map)
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         

@@ -298,7 +298,8 @@ class BatchGenerator(object):
 # --- Main Script ---
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SEED = 19980125
+#SEED = 19980125
+SEED = 20020827 # my birthday
 random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -308,19 +309,23 @@ def main():
     # --- CONFIG ---
     action = 'train' 
     num_epochs = 50
-    lr = 0.0005
+    lr = 0.0005 # 1e-4 is better
     
     # !!! SET THIS TO AVOID OOM !!!
     # 1 fps = 1200 frames for 20 mins (Very safe)
     # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
-    TARGET_FPS = 1 
+    TARGET_FPS = 30 
+    FOLD = 1
+    print(FOLD)
     
     base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
     features_path = os.path.join(base_dir, "features_dinov3/") 
-    train_split_csv = os.path.join(base_dir, "updated_train_split.csv")
-    test_split_csv = os.path.join(base_dir, "updated_test_split.csv")
+    train_split_csv = f"cv_folds_generated/fold{FOLD}_train.csv"
+    test_split_csv = f"cv_folds_generated/fold{FOLD}_test.csv"
+    #train_split_csv = os.path.join(base_dir, "updated_train_split.csv")
+    #test_split_csv = os.path.join(base_dir, "updated_test_split.csv")
     
-    save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}")
+    save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}_{FOLD}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
