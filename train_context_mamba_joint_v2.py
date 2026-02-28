@@ -296,8 +296,8 @@ def main():
     set_seed()
     g = torch.Generator()
     g.manual_seed(SEED)
-    FOLD = 3
-    # freeze = True
+    FOLD = 2
+    freeze = True
     train_dataset = MedicalStreamingDataset(
         f"./cv_folds_generated/fold{FOLD}_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
@@ -352,13 +352,15 @@ def main():
     )
     
     # 4. Load the Model Weights
-    checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
+    #checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/checkpoints/base_shuffle/fold{FOLD}/best_mamba_model.pth"
     print(f"Loading weights from {checkpoint_path}...")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+    bad_tuple = model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+    print(bad_tuple)
     model.to(device)
-    # if freeze==True:
-    #     for param in model.parameters():
-    #         param.requires_grad = False
+    if freeze==True:
+        for param in model.parameters():
+            param.requires_grad = False
     
     full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
     # checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/full_pipeline_best_mamba_model.pth"
@@ -369,9 +371,9 @@ def main():
     # full_model.load_state_dict(state_dict)
 
     # --- 4. Joint Optimization Setup ---
-    print("Enabling Joint Optimization: Unfreezing ALL parameters...")
-    for param in full_model.parameters():
-        param.requires_grad = True
+    #print("Enabling Joint Optimization: Unfreezing ALL parameters...")
+    #for param in full_model.parameters():
+        #param.requires_grad = True
 
     # --- Training Configuration ---
     epochs = 50
@@ -382,7 +384,7 @@ def main():
     # Save path for the new joint-training run
     save_dir = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "2joint_opt_s_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "v2_2joint_opt_s_best_mamba_model.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers

@@ -421,7 +421,7 @@ def main():
     VISION_DIM = train_dataset._detect_feature_dim() 
     d_model = 1024
     
-    config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=8)
+    config = MambaTemporalConfig(d_model=d_model, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
