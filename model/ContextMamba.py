@@ -1,6 +1,6 @@
 from model.CMamba import MixerModel, MambaTemporalSegmentation
 from model.Compressor import MultiLevelCompressor, MultiLevelCompressorv2
-from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, CausalQueryAwareMambaBlockv2
+from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, CausalQueryAwareMambaBlockv2, MultiheadCausalQueryAwareMambaBlockv2
 import torch
 import torch.nn as nn
 
@@ -17,6 +17,7 @@ class ContextMambav2(nn.Module):
         query_fps: float = 30.0,
         dropout: float = 0.1,
         future_fps: float = None,
+        use_multihead = False,
         **factory_kwargs
     ):
         super().__init__()
@@ -49,13 +50,22 @@ class ContextMambav2(nn.Module):
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # Anticipation: predict the next num_future second ahead using context and current
-        self.anticipation_head = CausalQueryAwareMambaBlockv2(
-            d_model=d_model, 
-            num_queries=num_future, 
-            d_state=128, 
-            d_conv=4, 
-            expand=2
-        )
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
 
         # Classifiers
         def build_mlp_head(in_dim, out_classes, hidden_expansion=2):

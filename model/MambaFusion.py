@@ -921,7 +921,7 @@ class CausalQueryAwareMambaBlockv2(nn.Module):
         y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q)
         
         # 3. Key and Value Projection for Scene Features
-        Q = self.linear_K(y_q)
+        Q = self.linear_Q(y_q)
         K = self.linear_K(y_s) # (B, L, D)
         V = self.linear_V(y_s) # (B, L, D)
         
@@ -952,6 +952,97 @@ class CausalQueryAwareMambaBlockv2(nn.Module):
         
         # 5. Residual Connection
         # Expand the original F_q (B, M, D) -> (B, 1, M, D) -> (B, L, M, D)
+        out = F_q.unsqueeze(1) + F_q_update 
+        
+        return out
+    
+class MultiheadCausalQueryAwareMambaBlockv2(nn.Module):
+    def __init__(self, d_model, num_queries=3, num_heads=8, d_state=128, d_conv=4, expand=2):
+        super().__init__()
+        self.d_model = d_model
+        self.num_queries = num_queries
+        self.num_heads = num_heads
+        
+        # Ensure d_model can be cleanly divided into heads
+        assert d_model % num_heads == 0, f"d_model ({d_model}) must be divisible by num_heads ({num_heads})"
+        self.head_dim = d_model // num_heads
+        
+        # --- Learnable Queries ---
+        self.learnable_query = nn.Parameter(torch.randn(num_queries, d_model))
+        
+        # --- Normalization ---
+        self.norm_s = nn.LayerNorm(d_model)
+        self.norm_q = nn.LayerNorm(d_model)
+        
+        # --- Independent Sequence Processing ---
+        # (Assuming TimeScaleAwareMamba2 is defined elsewhere in your codebase)
+        self.mamba_s = TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mamba_q = TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        
+        # --- Multi-Head Projections ---
+        self.linear_Q = nn.Linear(d_model, d_model)
+        self.linear_K = nn.Linear(d_model, d_model)
+        self.linear_V = nn.Linear(d_model, d_model)
+        
+        # We add an output projection to mix the information across the different 
+        # heads after they have been independently gated.
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None):
+        B, L, D = F_s.shape
+        M = self.num_queries
+        H = self.num_heads
+        Hd = self.head_dim
+        
+        # 0. Broadcast learnable query to match batch size: (B, M, D)
+        F_q = self.learnable_query.unsqueeze(0).expand(B, -1, -1)
+        
+        # 1. Normalization
+        F_s_norm = self.norm_s(F_s)
+        F_q_norm = self.norm_q(F_q)
+        
+        # 2. Independent Causal Scanning
+        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s) # (B, L, D)
+        y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q) # (B, M, D)
+        
+        # 3. Key and Value Projection
+        Q = self.linear_Q(y_q) # (B, M, D)
+        K = self.linear_K(y_s) # (B, L, D)
+        V = self.linear_V(y_s) # (B, L, D)
+        
+        # --- 4. MULTI-HEAD O(L) CAUSAL CROSS-INTERACTION ---
+        
+        # Reshape to isolate the heads: (Batch, Seq/Query, Heads, Head_Dim)
+        Q_multi = Q.view(B, M, H, Hd) 
+        K_multi = K.view(B, L, H, Hd)     
+        V_multi = V.view(B, L, H, Hd)     
+        
+        # Point-wise dot product interaction per head.
+        # This computes the similarity between Queries and Keys for each head independently.
+        # b=batch, m=queries, l=seq_len, h=heads, d=head_dim
+        # Output shape: (B, L, M, H) - Notice 'd' is summed out by the dot product
+        scores = torch.einsum('bmhd,blhd->blmh', Q_multi, K_multi) / math.sqrt(Hd)
+        
+        # Independent sigmoid gating per query, per head, per time step
+        gates = torch.sigmoid(scores) # (B, L, M, H)
+        
+        # Apply gates to Values using broadcasting
+        # V_multi needs an 'M' dimension: (B, L, 1, H, Hd)
+        # gates needs a 'Hd' dimension:   (B, L, M, H, 1)
+        V_expanded = V_multi.unsqueeze(2)
+        gates_expanded = gates.unsqueeze(-1)
+        
+        # Broadcast multiply: (B, L, M, H, Hd)
+        F_q_update_multi = gates_expanded * V_expanded
+        
+        # Flatten the heads back into the original d_model dimension: (B, L, M, D)
+        F_q_update = F_q_update_multi.reshape(B, L, M, D)
+        
+        # Mix the concatenated heads together
+        F_q_update = self.out_proj(F_q_update)
+        
+        # --- 5. Residual Connection ---
+        # Expand the original F_q (B, M, D) -> (B, 1, M, D) so it broadcasts across L
         out = F_q.unsqueeze(1) + F_q_update 
         
         return out
