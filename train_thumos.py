@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 # --- IMPORTS FROM YOUR FILES ---
 # Assuming your model files are in the path or same directory
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMamba, ContextMambaCmeRT
+from model.ContextMamba import ContextMambaForThumos, ContextMambaCmeRT
 from metrics import perframe_average_precision
 from dataset.thumos import ThumosStreamingDataset # Assuming you saved the fixed dataset here
 
@@ -419,21 +419,23 @@ def main():
     # Thumos features (concatenated RGB+Flow) are usually 2048 dims (1024+1024)
     # Check your feature files! If purely RGB, change to 1024.
     VISION_DIM = train_dataset._detect_feature_dim() 
+    d_model = 1024
     
     config = MambaTemporalConfig(d_model=VISION_DIM, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
         config=config, 
-        vision_dim=VISION_DIM, 
+        vision_dim=d_model, 
         num_classes=THUMOS_CLASSES, 
         device=device, 
         loss_fn=loss_fn
     )
     
-    full_model = ContextMamba(
+    full_model = ContextMambaForThumos(
         base_model=model.backbone, 
-        d_model=VISION_DIM, 
+        vision_dim=VISION_DIM,
+        d_model=d_model, 
         num_classes=THUMOS_CLASSES, 
         target_fps=4.0,
         context_fps=4.0,
@@ -446,16 +448,16 @@ def main():
     base_d_state = full_model.base_model.layers[0].mixer.d_state
     print(f"Base Model d_state: {base_d_state}")
 
-    checkpoint_path = "/scratch/lt200353-pcllm/long_future_joint_thumos_mamba_0.6988.pth"
-    #print(f"Loading weights from {checkpoint_path}...")
+    # checkpoint_path = "/scratch/lt200353-pcllm/long_future_joint_thumos_mamba_0.6988.pth"
+    # #print(f"Loading weights from {checkpoint_path}...")
 
-    # Load directly into full_model since this checkpoint includes the wrapper and backbone
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    full_model.load_state_dict(state_dict)
+    # # Load directly into full_model since this checkpoint includes the wrapper and backbone
+    # state_dict = torch.load(checkpoint_path, map_location=device)
+    # full_model.load_state_dict(state_dict)
 
-    if freeze==True:
-        for param in full_model.base_model.parameters():
-            param.requires_grad = False
+    # if freeze==True:
+    #     for param in full_model.base_model.parameters():
+    #         param.requires_grad = False
 
     # 4. Training
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-3)
