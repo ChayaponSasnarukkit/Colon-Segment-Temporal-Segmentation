@@ -876,3 +876,82 @@ class CausalQueryAwareMambaBlock(nn.Module):
         out = F_q.unsqueeze(1) + F_q_update 
         
         return out
+    
+
+class CausalQueryAwareMambaBlockv2(nn.Module):
+    def __init__(self, d_model, num_queries=3, d_state=128, d_conv=4, expand=2):
+        super().__init__()
+        self.d_model = d_model
+        self.num_queries = num_queries
+        
+        # --- Learnable Queries ---
+        self.learnable_query = nn.Parameter(torch.randn(num_queries, d_model))
+        
+        # --- Normalization ---
+        self.norm_s = nn.LayerNorm(d_model)
+        self.norm_q = nn.LayerNorm(d_model)
+        
+        # --- Independent Sequence Processing ---
+        # (Assuming TimeScaleAwareMamba2 is defined elsewhere)
+        self.mamba_s = TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mamba_q = TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        
+        # --- Key and Value Projections ---
+        # Mapping y_s into distinct Key and Value spaces gives the network more capacity
+        # to learn "what to match" (Key) separately from "what to extract" (Value).
+        self.linear_K = nn.Linear(d_model, d_model)
+        self.linear_V = nn.Linear(d_model, d_model)
+        self.linear_Q = nn.Linear(d_model, d_model)
+
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None):
+        B, L, D = F_s.shape
+        M = self.num_queries
+        
+        # 0. Broadcast learnable query to match batch size: (B, M, D)
+        F_q = self.learnable_query.unsqueeze(0).expand(B, -1, -1)
+        
+        # 1. Normalization
+        F_s_norm = self.norm_s(F_s)
+        F_q_norm = self.norm_q(F_q)
+        
+        # 2. Independent Causal Scanning
+        # y_s: (B, L, D)
+        # y_q: (B, M, D)
+        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s) 
+        y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q)
+        
+        # 3. Key and Value Projection for Scene Features
+        Q = self.linear_K(y_q)
+        K = self.linear_K(y_s) # (B, L, D)
+        V = self.linear_V(y_s) # (B, L, D)
+        
+        # --- 4. O(L) PARALLEL CROSS-INTERACTION ---
+        # WHY THIS IS CAUSAL WITHOUT A MASK:
+        # 1. Inherited Causality: Because of Mamba's state-space scan, the vector y_s[:, l, :] 
+        #    (and consequently K[:, l, :] and V[:, l, :]) is already a compressed summary of 
+        #    the causal history from time step 0 up to `l`. It contains absolutely no information 
+        #    about future time steps (l+1, l+2, etc.).
+        # 2. Localized Interaction: The einsum below computes the dot product between the queries 
+        #    and the Keys strictly at the same time index `l`. It does not aggregate across the 
+        #    sequence length `L`. 
+        # Therefore, the update for step `l` only relies on K and V at step `l`, which themselves 
+        # only know about the past. Causality is strictly maintained.
+        
+        # Compute dot-product similarity between queries and causal Keys.
+        # Output shape: (B, L, M)
+        scores = torch.einsum('bmd,bld->blm', Q, K) / math.sqrt(self.d_model)
+        
+        # Apply Sigmoid to act as an independent information gate for each query
+        gates = torch.sigmoid(scores) # (B, L, M)
+        
+        # Apply the gate to the projected Values
+        # V is (B, L, D) -> unsqueeze to (B, L, 1, D) for broadcasting
+        # gates is (B, L, M) -> unsqueeze to (B, L, M, 1) for broadcasting
+        # Output shape: (B, L, M, D)
+        F_q_update = gates.unsqueeze(-1) * V.unsqueeze(2) 
+        
+        # 5. Residual Connection
+        # Expand the original F_q (B, M, D) -> (B, 1, M, D) -> (B, L, M, D)
+        out = F_q.unsqueeze(1) + F_q_update 
+        
+        return out

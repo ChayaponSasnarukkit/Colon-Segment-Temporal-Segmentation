@@ -156,6 +156,281 @@ class GatedFusionMambaBlock(nn.Module):
 
         return hidden_states + residual
 
+class GatedFusionMambaBlockv2(nn.Module):
+    def __init__(
+        self, 
+        hidden_dim, 
+        frames_per_query, 
+        bidirectional=True, 
+        backbone="Mamba2",
+        state_size=16,
+        conv_kernel=4,
+        expand=2,
+        head_dim=64,
+        use_mlp=True,     
+        mlp_ratio=4.0,     
+        dropout=0.1
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.frames_per_query = frames_per_query
+        self.bidirectional = bidirectional
+        self.use_mlp = use_mlp
+        # 1. Pre-Norm
+        self.norm1 = MambaRMSNorm(self.hidden_dim)
+        
+        # 2. GPA Parameters (Adaptive Gating)
+        self.gate_drop = nn.Dropout(p=dropout)
+        self.weight_drop = nn.Dropout(p=dropout)
+        self.weight_fc = nn.Linear(self.hidden_dim, self.frames_per_query)
+        self.gate_fc = nn.Linear(self.hidden_dim, 1)
+        
+        nn.init.zeros_(self.weight_fc.bias)
+        nn.init.zeros_(self.gate_fc.bias)
+        with torch.no_grad():
+            self.weight_fc.weight.mul_(1e-3)
+            self.gate_fc.weight.mul_(1e-3)
+
+        # 3. Dynamic Backbone Selection
+        if backbone == "Mamba1":
+            mixer_cls = partial(
+                Mamba, d_model=self.hidden_dim, d_state=state_size, 
+                d_conv=conv_kernel, expand=expand
+            )
+        elif backbone == "Mamba2":
+            mixer_cls = partial(
+                Mamba2, d_model=self.hidden_dim, d_state=state_size, 
+                d_conv=conv_kernel, expand=expand, headdim=head_dim
+            )
+        else:
+            raise ValueError("Choose 'Mamba1' or 'Mamba2'.")
+
+        self.mixer_fwd = mixer_cls()
+        if self.bidirectional:
+            self.mixer_bwd = mixer_cls()
+
+        # 4. Residual Dropout
+        self.resid_drop = nn.Dropout(dropout)
+
+        # 5. Optional MLP Block
+        if self.use_mlp:
+            self.norm2 = MambaRMSNorm(self.hidden_dim)
+            self.mlp = MambaMLP(self.hidden_dim, mlp_ratio, dropout=dropout)
+
+    def forward(self, hidden_states):
+        # hidden_states [B, T, D]
+        hidden_states = self.norm1(hidden_states)
+        residual = hidden_states
+
+        # === 1. Sequence Modeling (Global Scan) First ===
+        # Now, features gain global context BEFORE gated fusion.
+        if self.bidirectional:
+            out_fwd = self.mixer_fwd(hidden_states)
+    
+            # Apply contiguous() before passing to the kernel and after flipping back
+            hidden_bwd = hidden_states.flip([1]).contiguous()
+            out_bwd = self.mixer_bwd(hidden_bwd).flip([1]).contiguous()
+            
+            hidden_states = out_fwd + out_bwd
+        else:
+            hidden_states = self.mixer_fwd(hidden_states)
+
+        # === 2. Temporal Gated Aggregation (GPA) Second ===
+        # The gating mechanism now uses context-aware embeddings.
+        bsz, seq_len, hidden_dim = hidden_states.shape
+        chunk_with_query = self.frames_per_query + 1
+        n_chunk = seq_len // chunk_with_query
+
+        hidden_4d = hidden_states.reshape(bsz, n_chunk, chunk_with_query, hidden_dim) 
+        frames = hidden_4d[:, :, :self.frames_per_query, :]
+        queries = hidden_4d[:, :, self.frames_per_query, :]
+
+        w_in = self.weight_drop(queries)
+        alpha = torch.softmax(self.weight_fc(w_in), dim=-1)
+        aggregator = (frames * alpha.unsqueeze(-1)).sum(dim=2)
+
+        gating_in = self.gate_drop(queries)
+        gating = torch.sigmoid(self.gate_fc(gating_in))
+        epsilon = 0.01
+        gating = gating * (1 - 2 * epsilon) + epsilon
+        gating_broad = gating.expand(-1, -1, hidden_dim)
+
+        # f = (1-g)q + ga
+        queries_new = queries * (1 - gating_broad) + aggregator * gating_broad
+
+        # Re-concatenate the frames and the newly updated queries along the sequence dimension
+        hidden_4d = torch.cat([frames, queries_new.unsqueeze(2)], dim=2)
+        hidden_states = hidden_4d.reshape(bsz, seq_len, hidden_dim)
+
+        # --- Residual Drop & Addition ---
+        hidden_states = self.resid_drop(hidden_states)
+        hidden_states = hidden_states + residual
+
+        # === 3. Optional Channel Mixing (MLP) ===
+        if self.use_mlp:
+            residual_mlp = hidden_states
+            hidden_states = self.norm2(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            # (Dropout for the MLP is already handled inside the MambaMLP's forward pass)
+            hidden_states = hidden_states + residual_mlp
+
+        # Returning hidden_states
+        return hidden_states
+    
+class TemporalCompressorv2(nn.Module):
+    """
+    Accepts raw vision embeddings, handles query insertion, processes them 
+    through Mamba layers, and outputs the compressed sequence.
+    """
+    def __init__(
+        self, 
+        hidden_dim=1024, 
+        frames_per_query=10, 
+        num_layers=3, 
+        bidirectional=True, 
+        backbone="Mamba2",
+        padding=False,
+        use_mlp=True,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.frames_per_query = frames_per_query
+        self.padding = padding
+        self.use_mlp = use_mlp
+        
+        # The learnable query token that acts as our "blank canvas" for each chunk
+        std = 1.0 / math.sqrt(hidden_dim)
+        self.query_token = nn.Parameter(torch.randn(1, 1, hidden_dim) * std)
+        
+        # The stack of Mamba blocks
+        self.blocks = nn.ModuleList([
+            GatedFusionMambaBlockv2(
+                hidden_dim=hidden_dim, 
+                frames_per_query=frames_per_query, 
+                bidirectional=bidirectional, 
+                backbone=backbone,
+                use_mlp=self.use_mlp
+            ) 
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, vision_embs):
+        """
+        Args:
+            vision_embs: (batch_size, num_frames, hidden_dim)
+        Returns:
+            compressed_embs: (batch_size, num_chunks, hidden_dim)
+        """
+        bsz, num_frames, hidden_dim = vision_embs.shape
+        
+        # 1. Padding (Ensure num_frames is perfectly divisible by frames_per_query)
+        remainder = num_frames % self.frames_per_query
+        if remainder != 0:
+            if self.padding:
+                pad_len = self.frames_per_query - remainder
+                # Pad the sequence with zeros along the temporal dimension
+                padding = torch.zeros(bsz, pad_len, hidden_dim, device=vision_embs.device, dtype=vision_embs.dtype)
+                vision_embs = torch.cat([vision_embs, padding], dim=1)
+                num_frames = vision_embs.shape[1]
+            else:
+                vision_embs = vision_embs[:, :-remainder, :]
+                num_frames = vision_embs.shape[1]
+                if num_frames == 0:
+                    # Return an empty tensor of the correct shape to avoid crashing downstream
+                    return None
+
+        num_chunks = num_frames // self.frames_per_query
+
+        if num_chunks == 0:
+            return None
+
+        # 2. Reshape into chunks to prepare for query insertion
+        # Shape: (bsz, num_chunks, frames_per_query, hidden_dim)
+        chunked_embs = vision_embs.reshape(bsz, num_chunks, self.frames_per_query, hidden_dim)
+
+        # 3. Expand the learned query token to match the batch and chunk size
+        # Shape: (bsz, num_chunks, 1, hidden_dim)
+        queries = self.query_token.expand(bsz, num_chunks, 1, hidden_dim)
+
+        # 4. Insert the query token at the end of every chunk
+        # Shape: (bsz, num_chunks, frames_per_query + 1, hidden_dim)
+        chunked_with_queries = torch.cat([chunked_embs, queries], dim=2)
+
+        # 5. Flatten back to a 1D sequence for Mamba
+        # The sequence is now slightly longer: num_frames + num_chunks
+        hidden_states = chunked_with_queries.reshape(bsz, -1, hidden_dim)
+
+        # 6. Pass through the stacked Mamba blocks
+        for block in self.blocks:
+            hidden_states = block(hidden_states)
+            
+        # 7. Extract the final compressed query tokens
+        chunk_with_query_len = self.frames_per_query + 1
+        final_4d = hidden_states.reshape(bsz, num_chunks, chunk_with_query_len, hidden_dim)
+        
+        # We only want the last token of every chunk (the fully updated query)
+        compressed_embs = final_4d[:, :, self.frames_per_query, :]
+        
+        return compressed_embs
+
+class MultiLevelCompressorv2(nn.Module):
+    def __init__(
+        self, 
+        hidden_dim=1024, 
+        num_stages=2,
+        frames_per_query=[24, 10], # 1 minute = token| compress rate = 240
+        num_layers_per_stage=2, 
+        bidirectional=True, 
+        backbone="Mamba2"
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.frames_per_query = frames_per_query
+        self.num_stages = num_stages
+        
+        # The stack of Mamba blocks
+        self.stages = nn.ModuleList([
+            TemporalCompressorv2(
+                hidden_dim=hidden_dim,
+                frames_per_query=frames_per_query[i],
+                num_layers=num_layers_per_stage,          # Stack of 3 layers
+                bidirectional=bidirectional,    # Use forward and backward scanning
+                backbone=backbone      # Highly optimized multi-head Mamba
+            )
+            for i in range(num_stages)
+        ])
+
+        if backbone == "Mamba1":
+            mixer_cls = partial(
+                Mamba, d_model=self.hidden_dim, d_state=16, 
+                d_conv=4, expand=2
+            )
+        elif backbone == "Mamba2":
+            mixer_cls = partial(
+                Mamba2, d_model=self.hidden_dim, d_state=16, 
+                d_conv=4, expand=2, headdim=64
+            )
+        else:
+            raise ValueError("Choose 'Mamba1' or 'Mamba2'.")
+
+        self.temporal_blocks = nn.ModuleList([
+            TemporalMambaBlock(hidden_dim=self.hidden_dim, mixer_cls=mixer_cls)
+            for _ in range(num_stages - 1)
+        ])
+
+        total_layers = (num_stages * num_layers_per_stage) + (num_stages - 1)
+        apply_depth_scaled_init(self, total_layers)
+
+    def forward(self, x):
+        if x is None:
+            return None # Exit early if context is dropped
+        for i in range(self.num_stages-1):
+            x = self.stages[i](x)
+            if x is None:
+                return None # Exit early if context is dropped
+            x = self.temporal_blocks[i](x)
+        x = self.stages[-1](x) # [B, T//compress_ratio, dim] where compress_ratio=self.frames_per_query[i] for i in range(self.num_stages)
+        return x
 
 class TemporalCompressor(nn.Module):
     """
