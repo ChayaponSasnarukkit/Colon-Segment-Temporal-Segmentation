@@ -314,7 +314,7 @@ def main():
     # !!! SET THIS TO AVOID OOM !!!
     # 1 fps = 1200 frames for 20 mins (Very safe)
     # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
-    TARGET_FPS = 30 
+    TARGET_FPS = 5 
     FOLD = 1
     print(FOLD)
     

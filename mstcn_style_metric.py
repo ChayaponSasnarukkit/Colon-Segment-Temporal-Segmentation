@@ -33,7 +33,7 @@ def get_labels_start_end_time(frame_wise_labels, bg_class=["background"]):
 def levenstein(p, y, norm=False):
     m_row = len(p)    
     n_col = len(y)
-    D = np.zeros([m_row+1, n_col+1], np.float)
+    D = np.zeros([m_row+1, n_col+1], float)
     for i in range(m_row+1):
         D[i, 0] = i
     for i in range(n_col+1):
@@ -62,7 +62,7 @@ def edit_score(recognized, ground_truth, norm=True, bg_class=["background"]):
     return levenstein(P, Y, norm)
 
 
-def iou_f_score(recognized, ground_truth, overlap, bg_class=["background"]):
+def iou_f1_score(recognized, ground_truth, overlap, bg_class=["background"]):
     p_label, p_start, p_end = get_labels_start_end_time(recognized, bg_class)
     y_label, y_start, y_end = get_labels_start_end_time(ground_truth, bg_class)
 
@@ -87,54 +87,3 @@ def iou_f_score(recognized, ground_truth, overlap, bg_class=["background"]):
     return float(tp), float(fp), float(fn)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--dataset', default="gtea")
-    parser.add_argument('--split', default='1')
-
-    args = parser.parse_args()
-
-    ground_truth_path = "./data/"+args.dataset+"/groundTruth/"
-    recog_path = "./results/"+args.dataset+"/split_"+args.split+"/"
-    file_list = "./data/"+args.dataset+"/splits/test.split"+args.split+".bundle"
-
-    list_of_videos = read_file(file_list).split('\n')[:-1]
-
-    overlap = [.1, .25, .5]
-    tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
-
-    correct = 0
-    total = 0
-    edit = 0
-
-    for vid in list_of_videos:
-        gt_file = ground_truth_path + vid
-        gt_content = read_file(gt_file).split('\n')[0:-1]
-        
-        recog_file = recog_path + vid.split('.')[0]
-        recog_content = read_file(recog_file).split('\n')[1].split()
-
-        for i in range(len(gt_content)):
-            total += 1
-            if gt_content[i] == recog_content[i]:
-                correct += 1
-        
-        edit += edit_score(recog_content, gt_content)
-
-        for s in range(len(overlap)):
-            tp1, fp1, fn1 = f_score(recog_content, gt_content, overlap[s])
-            tp[s] += tp1
-            fp[s] += fp1
-            fn[s] += fn1
-            
-    print "Acc: %.4f" % (100*float(correct)/total)
-    print 'Edit: %.4f' % ((1.0*edit)/len(list_of_videos))
-    for s in range(len(overlap)):
-        precision = tp[s] / float(tp[s]+fp[s])
-        recall = tp[s] / float(tp[s]+fn[s])
-    
-        f1 = 2.0 * (precision*recall) / (precision+recall)
-
-        f1 = np.nan_to_num(f1)*100
-        print 'F1@%0.2f: %.4f' % (overlap[s], f1)

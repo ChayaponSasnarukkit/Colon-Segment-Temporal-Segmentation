@@ -353,7 +353,7 @@ def get_labels_start_end_time(frame_wise_labels, bg_class=["background"]):
 def levenstein(p, y, norm=False):
     m_row = len(p)    
     n_col = len(y)
-    D = np.zeros([m_row+1, n_col+1], np.float)
+    D = np.zeros([m_row+1, n_col+1], float)
     for i in range(m_row+1):
         D[i, 0] = i
     for i in range(n_col+1):
@@ -382,7 +382,7 @@ def edit_score(recognized, ground_truth, norm=True, bg_class=["background"]):
     return levenstein(P, Y, norm)
  
  
-def f_score(recognized, ground_truth, overlap, bg_class=["background"]):
+def iou_f1_score(recognized, ground_truth, overlap, bg_class=["background"]):
     p_label, p_start, p_end = get_labels_start_end_time(recognized, bg_class)
     y_label, y_start, y_end = get_labels_start_end_time(ground_truth, bg_class)
  
@@ -608,59 +608,82 @@ class Trainer:
 
         self.model.train()
         batch_gen_tst.reset()"""
-    def test(self, batch_gen_tst, epoch):
+    def test(self, batch_gen_tst, epoch, device="cuda", bg_class=[-100]):
+        # Make sure to import these at the top of your file:
+        # from mstcn_style_metric import edit_score, iou_f1_score
+        
         self.model.eval()
         correct = 0
         total = 0
         
-        # 1. Initialize lists for F1 calculation
+        # 1. Sklearn metrics initialization (flat frames)
         all_preds = []
         all_targets = []
         
-        # Check your next_batch arguments! 
-        # If you removed the 'warp' argument from the class definition earlier, remove 'if_warp' here too.
-        # batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1) 
-        
-        if_warp = False 
+        # 2. MS-TCN metrics initialization (temporal sequences)
+        overlap = [0.1, 0.25, 0.5]
+        tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
+        edit_total = 0.0
+        num_videos = 0
         
         with torch.no_grad():
             while batch_gen_tst.has_next():
-                # Note: Ensure this matches your fixed BatchGenerator definition (1 or 2 args)
-                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1, False) # Removed if_warp based on previous fix
-                
+                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1, False)
                 batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
-                p = self.model(batch_input, mask)
-                _, predicted = torch.max(p.data[-1], 1)
                 
-                # --- F1 Collection Logic ---
+                p = self.model(batch_input, mask)
+                _, predicted = torch.max(p[-1].data, 1)
+                
                 valid_mask = mask[:, 0, :] == 1
                 
-                # Filter valid frames and move to CPU
-                active_preds = predicted[valid_mask].cpu().numpy()
-                active_targets = batch_target[valid_mask].cpu().numpy()
+                # Get the continuous sequence for this specific video as a list
+                active_preds = predicted[valid_mask].cpu().numpy().tolist()
+                active_targets = batch_target[valid_mask].cpu().numpy().tolist()
                 
-                all_preds.append(active_preds)
-                all_targets.append(active_targets)
-                # ---------------------------
+                # Append for flat Sklearn metrics
+                all_preds.extend(active_preds)
+                all_targets.extend(active_targets)
 
+                # Calculate MS-TCN temporal metrics for this video sequence
+                if len(active_preds) > 0:
+                    edit_total += edit_score(active_preds, active_targets, bg_class=bg_class)
+                    num_videos += 1
+                    for s in range(len(overlap)):
+                        tp1, fp1, fn1 = iou_f1_score(active_preds, active_targets, overlap[s], bg_class=bg_class)
+                        tp[s] += tp1
+                        fp[s] += fp1
+                        fn[s] += fn1
+
+                # Calculate Accuracy
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
 
-        # 2. Calculate Metrics
+        # --- Calculate Final Metrics ---
+        
+        # Sklearn Metrics
         acc = float(correct) / total
-        
-        # Concatenate all batches
-        np_preds = np.concatenate(all_preds)
-        np_targets = np.concatenate(all_targets)
-        
-        # Calculate Macro F1
-        f1 = f1_score(np_targets, np_preds, average='macro')
+        f1_macro = f1_score(all_targets, all_preds, average='macro', zero_division=0)
 
-        print("---[epoch %d]---: tst acc = %.4f,  tst F1 = %.4f" % (epoch + 1, acc, f1))
+        # MS-TCN Metrics
+        avg_edit = edit_total / num_videos if num_videos > 0 else 0.0
+        f1s = []
+        for s in range(len(overlap)):
+            precision = tp[s] / float(tp[s] + fp[s]) if (tp[s] + fp[s]) > 0 else 0.0
+            recall = tp[s] / float(tp[s] + fn[s]) if (tp[s] + fn[s]) > 0 else 0.0
+            f1_val = 2.0 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1s.append(np.nan_to_num(f1_val) * 100)
+
+        # --- Print Results ---
+        print("\n---[epoch %d]---" % (epoch + 1))
+        print("  Test Acc:      %.4f" % acc)
+        print("  Test Macro F1: %.4f" % f1_macro)
+        print("  Edit Score:    %.4f" % avg_edit)
+        for i, thresh in enumerate(overlap):
+            print("  F1@%.2f:       %.4f" % (thresh, f1s[i]))
+        print("------------------\n")
 
         self.model.train()
         batch_gen_tst.reset()
-
     def predict(self, model_dir, results_dir, features_path, batch_gen_tst, epoch, actions_dict, sample_rate):
         self.model.eval()
         with torch.no_grad():

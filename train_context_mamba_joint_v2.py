@@ -182,7 +182,7 @@ from mstcn_style_metric import edit_score, iou_f1_score
 import collections
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
-             lambda_smooth=0.0, lambda_jump=0.0, bg_class=[0]): 
+             lambda_smooth=0.0, lambda_jump=0.0, bg_class=[]): 
     # Added bg_class parameter (defaulting to [0] or whatever your background integer is)
     
     model.eval()
@@ -441,7 +441,7 @@ def main():
     
     # # Load directly into full_model since this checkpoint includes the wrapper and backbone
     state_dict = torch.load(checkpoint_path, map_location=device)
-    # print(full_model.load_state_dict(state_dict, strict=False))
+    print(full_model.load_state_dict(state_dict, strict=False))
 
     # --- 4. Joint Optimization Setup ---
     print("Enabling Joint Optimization: Unfreezing ALL parameters...")
@@ -449,7 +449,7 @@ def main():
         param.requires_grad = True
 
     # --- Training Configuration ---
-    epochs = 30
+    epochs = 50
     patience = 50 
     patience_counter = 0
     best_val_loss = float('inf')
