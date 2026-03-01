@@ -266,7 +266,7 @@ def main():
     
     # Check the typo in your original file name if this fails to load.
     # In your previous code, you saved it as 'mdodel.pth' but might have meant 'model.pth'
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_model.pth"
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_mdodel.pth"
     
     print(f"Loading weights from {checkpoint_path}...")
     state_dict = torch.load(checkpoint_path, map_location=device)
