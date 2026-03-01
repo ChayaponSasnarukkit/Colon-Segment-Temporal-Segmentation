@@ -31,6 +31,7 @@ class ThumosStreamingDataset(IterableDataset):
                  phase='train',
                  shuffle=True,
                  return_indices=True,
+                 temporal_jitter=False
                  ):
         
         self.data_root = data_root
@@ -39,6 +40,7 @@ class ThumosStreamingDataset(IterableDataset):
         self.phase = phase
         self.batch_size = batch_size_per_worker
         self.chunk_size = chunk_size 
+        self.temporal_jitter = temporal_jitter
         
         self.feature_folder_rgb = feature_folder_rgb
         self.feature_folder_flow = feature_folder_flow
@@ -170,7 +172,12 @@ class ThumosStreamingDataset(IterableDataset):
         def start_stream(session_idx):
             session_name = self.sessions[session_idx]
             feats, lbls, total = self._load_video_data(session_name)
-            return {'cursor': 0, 'total': total, 'features': feats, 'labels': lbls}
+            start_cursor = 0
+            if self.temporal_jitter:
+                max_offset = self.chunk_size * self.step
+                if total > max_offset:
+                    start_cursor = torch.randint(0, max_offset, (1,)).item()
+            return {'cursor': start_cursor, 'total': total, 'features': feats, 'labels': lbls, 'is_first_chunk': True}
 
         active_streams = [None] * self.batch_size
         idx_queue = my_indices.copy()
@@ -281,7 +288,8 @@ class ThumosStreamingDataset(IterableDataset):
                 batch_curr.append(curr_tensor)
                 batch_lbl.append(lbl_tensor)
                 batch_fut.append(batch_fut_tensor)
-                reset_mask.append(curr_start == 0)
+                reset_mask.append(stream['is_first_chunk'])
+                stream['is_first_chunk'] = False
 
                 # Advance
                 stream['cursor'] += span_needed

@@ -304,8 +304,8 @@ def main():
         use_multihead=True
     ).to(device)
     
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_mdodel.pth"
-    
+    #checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_mdodel.pth"
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold3/test_v2_joint_est_mamba_mdodel.pth"
     print(f"Loading weights from {checkpoint_path}...")
     state_dict = torch.load(checkpoint_path, map_location=device)
     full_model.load_state_dict(state_dict, strict=False)

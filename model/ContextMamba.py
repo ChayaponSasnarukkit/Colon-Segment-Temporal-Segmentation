@@ -11,6 +11,7 @@ class ContextMambav2(nn.Module):
         d_model: int,
         num_classes: int,
         num_future: int,
+        vision_dim = None,
         compression_ratio: float = 120.0,
         target_fps: float = 30.0,
         context_fps: float = 4.0,
@@ -29,6 +30,8 @@ class ContextMambav2(nn.Module):
         self.target_fps = target_fps
         self.context_fps = context_fps
         self.query_fps = query_fps
+        if vision_dim is None:
+            vision_dim = d_model
 
         if future_fps:
             self.future_fps = future_fps

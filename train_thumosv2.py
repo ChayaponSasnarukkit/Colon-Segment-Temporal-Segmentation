@@ -110,9 +110,9 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
     
     # Standard CE for Thumos (You can calculate class weights if needed)
     print("ignore index", ignore_index)
-    criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
+    #criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
     transition_penalty_loss = TransitionPenaltyLoss(num_classes=model.num_classes).to(device)
-
+    criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     optimizer.zero_grad() 
 
     for step, batch in enumerate(tqdm(dataloader, desc="Training")):
@@ -256,15 +256,15 @@ def validate_map(model, dataloader, device, num_classes, with_future=True, ignor
 
     model.eval()
     worker_states = {}
-    
+    print("ignore_index", ignore_index) 
     # Store probability scores and one-hot labels for mAP calculation
     all_scores = []
     all_targets = []
     
     total_loss = 0.0
     steps = 0
-    criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
-
+    #criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
+    criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     for step, batch in enumerate(tqdm(dataloader, desc="Validating (mAP)")):
         vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
         
@@ -365,7 +365,8 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-SEED = random.randint(0, 9876)
+#SEED = random.randint(0, 9876)
+SEED = 42
 # --- MAIN ---
 def main():
     freeze = False
@@ -421,7 +422,7 @@ def main():
     VISION_DIM = train_dataset._detect_feature_dim() 
     d_model = VISION_DIM
     
-    config = MambaTemporalConfig(d_model=d_model, n_layer=10)
+    config = MambaTemporalConfig(d_model=d_model, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
@@ -436,7 +437,8 @@ def main():
         base_model=model.backbone, 
         vision_dim=VISION_DIM,
         d_model=d_model, 
-        num_classes=THUMOS_CLASSES, 
+        num_classes=THUMOS_CLASSES,
+        use_multihead=True,
         target_fps=4.0,
         context_fps=4.0,
         query_fps=4.0,
@@ -495,10 +497,10 @@ def main():
         # Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=16, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=True, ignore_index=json_data.get('ignore_index', -100), lambda_smooth=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False, ignore_index=json_data.get('ignore_index', -100), lambda_smooth=0.0)
         
         # Validate (mAP)
-        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=True, ignore_index=json_data.get('ignore_index', -100))
+        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False, ignore_index=json_data.get('ignore_index', -100))
         
         print(f"Summary:")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -514,7 +516,7 @@ def main():
         if val_map > best_map:
             best_map = val_map
             print(f"New Best mAP! Saving...")
-            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/joint_pretrain_short_thumos_mamba_{val_map:.4f}.pth")
+            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/base_mamba_{val_map:.4f}.pth")
 
 if __name__ == "__main__":
     main()
