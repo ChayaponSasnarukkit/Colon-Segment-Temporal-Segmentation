@@ -224,7 +224,7 @@ def set_seed(seed=42):
 def main():
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    FOLD = 3
+    FOLD = 1
     
     print(f"Initializing Dataset for Fold {FOLD} on {device}...")
     val_dataset = MedicalStreamingDataset(

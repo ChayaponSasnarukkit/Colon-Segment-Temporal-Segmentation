@@ -369,7 +369,7 @@ def main():
     set_seed()
     g = torch.Generator()
     g.manual_seed(SEED)
-    FOLD = 3
+    FOLD = 1
     freeze = False
     train_dataset = MedicalStreamingDataset(
         f"./cv_folds_generated/fold{FOLD}_train.csv", 
@@ -436,12 +436,12 @@ def main():
             #param.requires_grad = False
     
     full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3, use_multihead=True).to(device)
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_model.pth"
-    print(f"Loading weights from {checkpoint_path}...")
+    #checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_model.pth"
+    #print(f"Loading weights from {checkpoint_path}...")
     
     # # Load directly into full_model since this checkpoint includes the wrapper and backbone
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    print(full_model.load_state_dict(state_dict, strict=False))
+    #state_dict = torch.load(checkpoint_path, map_location=device)
+    #print(full_model.load_state_dict(state_dict, strict=False))
 
     # --- 4. Joint Optimization Setup ---
     print("Enabling Joint Optimization: Unfreezing ALL parameters...")
