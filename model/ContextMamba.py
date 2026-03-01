@@ -11,7 +11,7 @@ class ContextMambav2(nn.Module):
         d_model: int,
         num_classes: int,
         num_future: int,
-        compression_ratio: float = 240.0,
+        compression_ratio: float = 120.0,
         target_fps: float = 30.0,
         context_fps: float = 4.0,
         query_fps: float = 30.0,
@@ -46,7 +46,7 @@ class ContextMambav2(nn.Module):
         #     **factory_kwargs
         # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model)
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[12, 10])
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # Anticipation: predict the next num_future second ahead using context and current
