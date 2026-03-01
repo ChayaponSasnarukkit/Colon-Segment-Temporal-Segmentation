@@ -179,21 +179,30 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
 
 from sklearn.metrics import accuracy_score, f1_score
 from mstcn_style_metric import edit_score, iou_f1_score 
+import collections
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
-             lambda_smooth=0.0, lambda_jump=0.0):
+             lambda_smooth=0.0, lambda_jump=0.0, bg_class=[0]): 
+    # Added bg_class parameter (defaulting to [0] or whatever your background integer is)
+    
     model.eval()
     total_loss = 0.0
     steps = 0
     
     worker_states = {}
-    #criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    #criterion = nn.CrossEntropyLoss(ignore_index=-100)                                                                    
     criterion = nn.CrossEntropyLoss(weight=f1_based_weights.to(device), ignore_index=-100)                                
-    # criterion = nn.CrossEntropyLoss(weight=compute_class_weights("/scratch/lt200353-pcllm/location/cas_colon/updated_train_split.csv").to(device), ignore_index=-100)
 
+    # For Sklearn metrics (flat frames)
     all_preds = []
     all_labels = []
+    
+    # --- NEW: For MS-TCN Temporal Metrics (Full sequences) ---
+    video_preds_dict = collections.defaultdict(list)
+    video_labels_dict = collections.defaultdict(list)
+    completed_video_preds = []
+    completed_video_labels = []
+    # ---------------------------------------------------------
+
     total_loss_wo = 0.0
     total_loss_w = 0.0
     total_loss_future = 0.0
@@ -247,30 +256,93 @@ def validate(model, dataloader, device, transition_penalty_loss,
         worker_states[w_id] = detach_states(next_states)
         
         # --- Metrics Collection ---
-        # We care about the final prediction: logits_w_future
         preds = torch.argmax(logits_w_future, dim=-1) # [B, M]
         
-        preds_flat = preds.view(-1).cpu().numpy()
-        labels_flat = labels.view(-1).cpu().numpy()
+        # We need to iterate over the batch to handle sequence boundaries
+        for b in range(preds.size(0)):
+            b_w_id = int(worker_id[b].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+            b_reset = bool(reset_mask[b].item()) if isinstance(reset_mask, torch.Tensor) else bool(reset_mask)
+            
+            # If reset_mask is True, a new video is starting. 
+            # Save the old one if it exists.
+            if b_reset and len(video_preds_dict[b_w_id]) > 0:
+                completed_video_preds.append(video_preds_dict[b_w_id])
+                completed_video_labels.append(video_labels_dict[b_w_id])
+                video_preds_dict[b_w_id] = []
+                video_labels_dict[b_w_id] = []
+
+            p_flat = preds[b].cpu().numpy()
+            l_flat = labels[b].cpu().numpy()
+            
+            valid_indices = l_flat != -100
+            
+            valid_preds = p_flat[valid_indices].tolist()
+            valid_labels = l_flat[valid_indices].tolist()
+
+            # Append to Sklearn flat lists
+            all_preds.extend(valid_preds)
+            all_labels.extend(valid_labels)
+            
+            # Append to MS-TCN per-video sequence lists
+            video_preds_dict[b_w_id].extend(valid_preds)
+            video_labels_dict[b_w_id].extend(valid_labels)
+
+    # After the dataloader finishes, flush any remaining videos in the dictionary
+    for w_id, p_seq in video_preds_dict.items():
+        if len(p_seq) > 0:
+            completed_video_preds.append(p_seq)
+            completed_video_labels.append(video_labels_dict[w_id])
+
+    # -----------------------------------------------------------------
+    # Calculate MS-TCN Metrics over the completed sequences
+    # -----------------------------------------------------------------
+    overlap = [0.1, 0.25, 0.5]
+    tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
+    edit_total = 0.0
+    
+    for p_seq, l_seq in zip(completed_video_preds, completed_video_labels):
+        if len(p_seq) == 0:
+            continue
+            
+        edit_total += edit_score(p_seq, l_seq, bg_class=bg_class)
         
-        # Filter out padded areas (-100)
-        valid_indices = labels_flat != -100
-        
-        all_preds.extend(preds_flat[valid_indices])
-        all_labels.extend(labels_flat[valid_indices])
+        for s in range(len(overlap)):
+            # NOTE: make sure iou_f1_score maps to the f_score function you provided
+            tp1, fp1, fn1 = iou_f1_score(p_seq, l_seq, overlap[s], bg_class=bg_class)
+            tp[s] += tp1
+            fp[s] += fp1
+            fn[s] += fn1
+
+    avg_edit = edit_total / len(completed_video_preds) if len(completed_video_preds) > 0 else 0.0
+    
+    f1s = []
+    for s in range(len(overlap)):
+        precision = tp[s] / float(tp[s] + fp[s]) if (tp[s] + fp[s]) > 0 else 0.0
+        recall = tp[s] / float(tp[s] + fn[s]) if (tp[s] + fn[s]) > 0 else 0.0
+        f1 = 2.0 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        f1s.append(np.nan_to_num(f1) * 100)
+
+    # -----------------------------------------------------------------
 
     avg_loss = total_loss / (steps if steps > 0 else 1)
-    print(f"  val_loss_wo:    {total_loss_wo / steps:.4f}")
-    print(f"  val_loss_w:    {total_loss_w / steps:.4f}")
-    print(f"  val_loss_future:    {total_loss_future / steps:.4f}")
-    print(f"  val_loss_smooth:    {total_loss_smooth / steps:.4f}")
+    print(f"  val_loss_wo:      {total_loss_wo / steps:.4f}")
+    print(f"  val_loss_w:       {total_loss_w / steps:.4f}")
+    print(f"  val_loss_future:  {total_loss_future / steps:.4f}")
+    print(f"  val_loss_smooth:  {total_loss_smooth / steps:.4f}")
     print(f"  val_loss_jump:    {total_loss_jump / steps:.4f}")
+    
     # Calculate Sklearn Metrics
     val_acc = accuracy_score(all_labels, all_preds) if len(all_labels) > 0 else 0.0
     val_f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0) if len(all_labels) > 0 else 0.0
     val_f1_per_class = f1_score(all_labels, all_preds, average=None, labels=list(range(model.num_classes)), zero_division=0) if len(all_labels) > 0 else []
 
-    return avg_loss, val_acc, val_f1_macro, val_f1_per_class
+    # Print MS-TCN Metrics
+    print(f"  Edit Score:       {avg_edit:.4f}")
+    for i, thresh in enumerate(overlap):
+        print(f"  F1@{thresh:.2f}:          {f1s[i]:.4f}")
+
+    # I recommend returning the new metrics so you can log them to wandb / tensorboard
+    return avg_loss, val_acc, val_f1_macro, val_f1_per_class # , avg_edit, f1s
 
 def set_seed(seed=42):
     """Sets the seed for reproducibility across all libraries."""
@@ -369,7 +441,7 @@ def main():
     
     # # Load directly into full_model since this checkpoint includes the wrapper and backbone
     state_dict = torch.load(checkpoint_path, map_location=device)
-    print(full_model.load_state_dict(state_dict, strict=False))
+    # print(full_model.load_state_dict(state_dict, strict=False))
 
     # --- 4. Joint Optimization Setup ---
     print("Enabling Joint Optimization: Unfreezing ALL parameters...")
@@ -448,7 +520,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.2, lambda_jump=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
