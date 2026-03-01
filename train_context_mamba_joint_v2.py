@@ -178,6 +178,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
     return total_loss / (steps if steps > 0 else 1)
 
 from sklearn.metrics import accuracy_score, f1_score
+from mstcn_style_metric import edit_score, iou_f1_score 
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
              lambda_smooth=0.0, lambda_jump=0.0):
@@ -296,8 +297,8 @@ def main():
     set_seed()
     g = torch.Generator()
     g.manual_seed(SEED)
-    FOLD = 2
-    freeze = True
+    FOLD = 3
+    freeze = False
     train_dataset = MedicalStreamingDataset(
         f"./cv_folds_generated/fold{FOLD}_train.csv", 
         "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
@@ -353,30 +354,30 @@ def main():
     
     # 4. Load the Model Weights
     #checkpoint_path = "checkpoints/base_shuffle_focal/best_small_mamba_model_4096.pth"
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/checkpoints/base_shuffle/fold{FOLD}/best_mamba_model.pth"
-    print(f"Loading weights from {checkpoint_path}...")
-    bad_tuple = model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
-    print(bad_tuple)
-    model.to(device)
-    if freeze==True:
-        for param in model.parameters():
-            param.requires_grad = False
+    #checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/checkpoints/base_shuffle/fold{FOLD}/best_mamba_model.pth"
+    #print(f"Loading weights from {checkpoint_path}...")
+    #bad_tuple = model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+    #print(bad_tuple)
+    #model.to(device)
+    #if freeze==True:
+        #for param in model.parameters():
+            #param.requires_grad = False
     
-    full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3).to(device)
-    # checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/full_pipeline_best_mamba_model.pth"
-    # print(f"Loading weights from {checkpoint_path}...")
+    full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3, use_multihead=True).to(device)
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_model.pth"
+    print(f"Loading weights from {checkpoint_path}...")
     
     # # Load directly into full_model since this checkpoint includes the wrapper and backbone
-    # state_dict = torch.load(checkpoint_path, map_location=device)
-    # full_model.load_state_dict(state_dict)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    print(full_model.load_state_dict(state_dict, strict=False))
 
     # --- 4. Joint Optimization Setup ---
-    #print("Enabling Joint Optimization: Unfreezing ALL parameters...")
-    #for param in full_model.parameters():
-        #param.requires_grad = True
+    print("Enabling Joint Optimization: Unfreezing ALL parameters...")
+    for param in full_model.parameters():
+        param.requires_grad = True
 
     # --- Training Configuration ---
-    epochs = 50
+    epochs = 30
     patience = 50 
     patience_counter = 0
     best_val_loss = float('inf')
@@ -384,7 +385,7 @@ def main():
     # Save path for the new joint-training run
     save_dir = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "v2_2joint_opt_s_best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "v2_realjoint_opt_s_best_mamba_mdodel.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -447,7 +448,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.25, lambda_jump=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.2, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
