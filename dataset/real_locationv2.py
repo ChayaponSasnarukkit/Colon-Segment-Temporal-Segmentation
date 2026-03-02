@@ -10,7 +10,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 #        'transverse', 'descending', 'sigmoid', 'rectum']
 CLASS_MAP = {
     'outside': 0,
-    'inside': 1, 
+    'insertion': 1, 
     'ceacum': 2,
     'ileum': 3,
     'ascending': 4,

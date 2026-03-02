@@ -35,16 +35,6 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import random
 import numpy as np
-CLASS_MAP = {
-    'outside': 0,
-    'inside': 1, 
-    'ceacum': 2,
-    'ileum': 3,
-    'ascending': 4,
-    'transverse': 5,
-    'descending': 6,
-    'sigmoid': 7, 'rectum': 8,
-}
 # --- 1. Custom Loss Functions ---
 
 def compute_temporal_smoothing_loss(logits, labels, ignore_index=-100):
@@ -371,14 +361,14 @@ def main():
 
     FOLD = 0
     print(f"Fold: {FOLD}")
-    
+
     base_dir = "/scratch/lt200353-pcllm/location/real_colon/"
     features_path = os.path.join(base_dir, "features_dinov3/") 
-    
+
     # NEW PATHS REQUIRED FOR THE NEW FORMAT:
     labels_dir = os.path.join(base_dir, "labels_cleaned/")     # Directory containing videoID.csv
     metadata_csv = os.path.join(base_dir, "video_info.csv")    # CSV containing unique_video_name and fps
-    
+
     #train_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_train.csv")
     #test_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_test.csv")
     with open(f"/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
