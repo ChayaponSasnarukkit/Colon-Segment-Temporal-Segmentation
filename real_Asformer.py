@@ -144,7 +144,7 @@ def main():
     
     #train_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_train.csv")
     #test_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_test.csv")
-    with open("/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
+    with open(f"/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
         splits = json.load(f)
 
     save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}_{FOLD}")
@@ -195,7 +195,7 @@ def main():
     #if os.path.exists(test_split_csv):
     batch_gen_test = BatchGenerator(
         actions_dict=actions_dict, 
-        label_files=splits["test"], 
+        label_files=splits["val"], 
         labels_dir=labels_dir, 
         metadata_csv=metadata_csv, 
         features_path=features_path, 

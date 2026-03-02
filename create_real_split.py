@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.model_selection import KFold
 
 # --- Configuration ---
-LABEL_DIR = "/scratch/lt200353-pcllm/location/real_colon/label/"
+LABEL_DIR = "/scratch/lt200353-pcllm/location/real_colon/labels_cleaned/"
 SPLITS_OUT_DIR = "/scratch/lt200353-pcllm/location/real_colon/splits/"
 
 def main():
