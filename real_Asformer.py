@@ -21,20 +21,20 @@ class BatchGenerator(object):
         # Assuming the metadata has a column 'unique_video_name' and 'fps'
         self.fps_dict = meta_df.set_index('unique_video_name')['fps'].to_dict()
 
-        self.video_ids = [os.path.basename(f).replace(".csv", "") for f in self.label_files]
+        self.list_of_examples = [os.path.basename(f).replace(".csv", "") for f in self.label_files]
 
         self.index = 0
         self.reset()
 
     def reset(self):
         self.index = 0
-        random.shuffle(self.video_ids)
+        random.shuffle(self.list_of_examples)
 
     def has_next(self):
-        return self.index < len(self.video_ids)
+        return self.index < len(self.list_of_examples)
 
     def next_batch(self, batch_size):
-        batch_ids = self.video_ids[self.index : self.index + batch_size]
+        batch_ids = self.list_of_examples[self.index : self.index + batch_size]
         self.index += batch_size
 
         batch_input = []

@@ -6,8 +6,8 @@ import math
 from torch.utils.data import IterableDataset, get_worker_info
 
 # --- 1. Define your new Class Map ---
-['outside', 'insertion', 'ceacum', 'ileum', 'ascending',
-       'transverse', 'descending', 'sigmoid', 'rectum']
+# ['outside', 'insertion', 'ceacum', 'ileum', 'ascending',
+#        'transverse', 'descending', 'sigmoid', 'rectum']
 CLASS_MAP = {
     'outside': 0,
     'inside': 1, 
