@@ -391,7 +391,7 @@ def main():
         use_memory_bank=True,
         context_seconds=600,
         context_fps=4,
-        num_future=12,
+        num_future=4,
         future_step=1, # future_fps=target_fps
         
         phase='train', shuffle=True, temporal_jitter=True
@@ -408,7 +408,7 @@ def main():
         use_memory_bank=True,
         context_seconds=600,
         context_fps=4,
-        num_future=12,
+        num_future=4,
         future_step=1, # future_fps=target_fps
         
         phase='test', shuffle=False
@@ -442,7 +442,7 @@ def main():
         target_fps=4.0,
         context_fps=4.0,
         query_fps=4.0,
-        num_future=12,
+        num_future=4,
         future_fps=4.0,
     ).to(device)
 
@@ -462,9 +462,9 @@ def main():
     #         param.requires_grad = False
 
     # 4. Training
-    optimizer = torch.optim.AdamW(full_model.parameters(), lr=1.0e-4, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(full_model.parameters(), lr=0.75e-4, weight_decay=1e-4)
     WARMUP_EPOCHS = 10 
-    MAX_EPOCHS = 15 # Must match your training loop epochs
+    MAX_EPOCHS = 30 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -516,7 +516,7 @@ def main():
         if val_map > best_map:
             best_map = val_map
             print(f"New Best mAP! Saving...")
-            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/small_epoch_big_long_mem_jilter_jont_mamba_{val_map:.4f}.pth")
+            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/XL_epoch_long_mem_jilter_jont_mamba_{val_map:.4f}.pth")
 
 if __name__ == "__main__":
     main()
