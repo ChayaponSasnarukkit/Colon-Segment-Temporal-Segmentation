@@ -33,7 +33,7 @@ class BatchGenerator(object):
     def has_next(self):
         return self.index < len(self.list_of_examples)
 
-    def next_batch(self, batch_size):
+    def next_batch(self, batch_size, tmp):
         batch_ids = self.list_of_examples[self.index : self.index + batch_size]
         self.index += batch_size
 
