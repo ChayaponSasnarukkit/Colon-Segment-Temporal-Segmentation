@@ -381,7 +381,7 @@ def main():
     
     #train_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_train.csv")
     #test_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_test.csv")
-    with open("/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
+    with open(f"/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
         splits = json.load(f)
 
     train_dataset = MedicalStreamingDataset(
@@ -400,7 +400,7 @@ def main():
 
         use_emb=True,
         emb_dim=1024,
-        transform=None)
+        )
 
     val_dataset = MedicalStreamingDataset(
         label_files=splits["val"], 
@@ -419,7 +419,7 @@ def main():
 
         use_emb=True,
         emb_dim=1024,
-        transform=None)
+        )
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_action_classes = len(CLASS_MAP)
@@ -445,7 +445,7 @@ def main():
         #for param in model.parameters():
             #param.requires_grad = False
     
-    full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3, use_multihead=True).to(device)
+    full_model = ContextMambav2(base_model=model.backbone, d_model=1024, num_classes=len(CLASS_MAP), num_future=3, use_multihead=True).to(device)
     #checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_model.pth"
     #print(f"Loading weights from {checkpoint_path}...")
     
@@ -465,9 +465,9 @@ def main():
     best_val_loss = float('inf')
     
     # Save path for the new joint-training run
-    save_dir = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/" 
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/full_shuffle/fold{FOLD}/" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "test1_v2_joint_est_mamba_mdodel.pth")
+    best_model_path = os.path.join(save_dir, "best.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -530,7 +530,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=2.5, lambda_jump=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.25, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
