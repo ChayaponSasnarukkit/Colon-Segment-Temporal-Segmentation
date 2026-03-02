@@ -305,7 +305,7 @@ def main():
     ).to(device)
     
     #checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/v2_realjoint_opt_s_best_mamba_mdodel.pth"
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold3/test_v2_joint_est_mamba_mdodel.pth"
+    checkpoint_path = f"/scratch/lt200353-pcllm/location/cas_colon/full_shuffle/fold{FOLD}/test1_v2_joint_est_mamba_mdodel.pth"
     print(f"Loading weights from {checkpoint_path}...")
     state_dict = torch.load(checkpoint_path, map_location=device)
     full_model.load_state_dict(state_dict, strict=False)
@@ -317,7 +317,7 @@ def main():
         dataloader=val_loader, 
         device=device, 
         csv_export_path=csv_output_file,
-        theta=0.8,    # Confidence threshold (80%)
+        theta=0.9,    # Confidence threshold (80%)
         l_min=300,     # Minimum length in frames (30 frames = 1 second)
         bg_class=[]
     )

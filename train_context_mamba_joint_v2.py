@@ -520,7 +520,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.05)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=2.5, lambda_jump=0.0)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)

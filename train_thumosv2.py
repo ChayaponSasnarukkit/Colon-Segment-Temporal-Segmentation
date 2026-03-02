@@ -394,7 +394,7 @@ def main():
         num_future=12,
         future_step=1, # future_fps=target_fps
         
-        phase='train', shuffle=True
+        phase='train', shuffle=True, temporal_jitter=True
     )
 
     val_dataset = ThumosStreamingDataset(
@@ -422,7 +422,7 @@ def main():
     VISION_DIM = train_dataset._detect_feature_dim() 
     d_model = VISION_DIM
     
-    config = MambaTemporalConfig(d_model=d_model, n_layer=8)
+    config = MambaTemporalConfig(d_model=d_model, n_layer=10)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
@@ -462,9 +462,9 @@ def main():
     #         param.requires_grad = False
 
     # 4. Training
-    optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(full_model.parameters(), lr=1.0e-4, weight_decay=1e-4)
     WARMUP_EPOCHS = 10 
-    MAX_EPOCHS = 50 # Must match your training loop epochs
+    MAX_EPOCHS = 15 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -497,10 +497,10 @@ def main():
         # Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=16, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=False, ignore_index=json_data.get('ignore_index', -100), lambda_smooth=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, with_future=True, ignore_index=json_data.get('ignore_index', -100), lambda_smooth=0.0, accumulation_steps=32)
         
         # Validate (mAP)
-        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=False, ignore_index=json_data.get('ignore_index', -100))
+        val_loss, val_map = validate_map(full_model, val_loader, device, THUMOS_CLASSES, with_future=True, ignore_index=json_data.get('ignore_index', -100))
         
         print(f"Summary:")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -516,7 +516,7 @@ def main():
         if val_map > best_map:
             best_map = val_map
             print(f"New Best mAP! Saving...")
-            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/base_mamba_{val_map:.4f}.pth")
+            torch.save(full_model.state_dict(), f"/scratch/lt200353-pcllm/small_epoch_big_long_mem_jilter_jont_mamba_{val_map:.4f}.pth")
 
 if __name__ == "__main__":
     main()
