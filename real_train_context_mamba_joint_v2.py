@@ -392,7 +392,7 @@ def main():
         video_root=base_dir, 
         metadata_csv=metadata_csv,
         batch_size_per_worker=1, 
-        chunk_size=1800, # 1 minute so we dont need to deal with edge case where context need to be recalculate
+        chunk_size=1500, # 1 minute so we dont need to deal with edge case where context need to be recalculate
         target_fps=25,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
@@ -406,13 +406,12 @@ def main():
         transform=None)
 
     val_dataset = MedicalStreamingDataset(
-        f"./cv_folds_generated/fold{FOLD}_test.csv", 
-        "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
-        1, 
-        chunk_size=1800, 
+        label_files=splits["val"], 
+        video_root=base_dir, 
+        metadata_csv=metadata_csv,
+        batch_size_per_worker=1, 
+        chunk_size=1500, # 60*25=
         
-        # FPS Configuration
-        fps=60,            # Source Video FPS
         target_fps=25,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
