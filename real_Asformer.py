@@ -125,26 +125,28 @@ random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
-
+import json
 def main():
     # --- CONFIG ---
     action = 'train' 
     num_epochs = 50
     lr = 0.0005 
     TARGET_FPS = 5 
-    FOLD = 3
+    FOLD = 0
     print(f"Fold: {FOLD}")
     
     base_dir = "/scratch/lt200353-pcllm/location/real_colon/"
     features_path = os.path.join(base_dir, "features_dinov3/") 
     
     # NEW PATHS REQUIRED FOR THE NEW FORMAT:
-    labels_dir = os.path.join(base_dir, "labels/")     # Directory containing videoID.csv
+    labels_dir = os.path.join(base_dir, "labels_cleaned/")     # Directory containing videoID.csv
     metadata_csv = os.path.join(base_dir, "video_info.csv")    # CSV containing unique_video_name and fps
     
-    train_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_train.csv")
-    test_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_test.csv")
-    
+    #train_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_train.csv")
+    #test_split_csv = os.path.join(base_dir, f"cv_folds_generated/fold{FOLD}_test.csv")
+    with open("/scratch/lt200353-pcllm/location/real_colon/splits/fold_{FOLD}.json") as f:
+        splits = json.load(f)
+
     save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}_{FOLD}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -178,29 +180,29 @@ def main():
     )
 
     # --- Instantiate Batch Generators with new arguments ---
-    if os.path.exists(train_split_csv):
-        batch_gen_train = BatchGenerator(
-            actions_dict=actions_dict, 
-            split_csv=train_split_csv, 
-            labels_dir=labels_dir, 
-            metadata_csv=metadata_csv, 
-            features_path=features_path, 
-            target_fps=TARGET_FPS
-        )
-    else:
-        raise FileNotFoundError(f"Train CSV not found: {train_split_csv}")
+    #if os.path.exists(train_split_csv):
+    batch_gen_train = BatchGenerator(
+        actions_dict=actions_dict, 
+        label_files=splits["train"], 
+        labels_dir=labels_dir, 
+        metadata_csv=metadata_csv, 
+        features_path=features_path, 
+        target_fps=TARGET_FPS
+    )
+    #else:
+        #raise FileNotFoundError(f"Train CSV not found: {train_split_csv}")
 
-    if os.path.exists(test_split_csv):
-        batch_gen_test = BatchGenerator(
-            actions_dict=actions_dict, 
-            split_csv=test_split_csv, 
-            labels_dir=labels_dir, 
-            metadata_csv=metadata_csv, 
-            features_path=features_path, 
-            target_fps=TARGET_FPS
-        )
-    else:
-        batch_gen_test = None
+    #if os.path.exists(test_split_csv):
+    batch_gen_test = BatchGenerator(
+        actions_dict=actions_dict, 
+        label_files=splits["test"], 
+        labels_dir=labels_dir, 
+        metadata_csv=metadata_csv, 
+        features_path=features_path, 
+        target_fps=TARGET_FPS
+    )
+    #else:
+        #batch_gen_test = None
 
     if action == 'train':
         print(f"Starting training at {TARGET_FPS} FPS...")
