@@ -17,8 +17,6 @@ CLASS_MAP = {
     'transverse': 5,
     'descending': 6,
     'sigmoid': 7, 'rectum': 8,
-    # Add your other actual classes here
-    'Background': -100 # -100 is standard PyTorch ignore_index for loss functions
 }
 NUM_CLASSES = len([k for k in CLASS_MAP if CLASS_MAP[k] >= 0])
 
@@ -186,7 +184,9 @@ class MedicalStreamingDataset(IterableDataset):
 
             # Load and map labels
             df = pd.read_csv(label_path)
-            dense_labels_np = df['GT'].map(CLASS_MAP).fillna(-100).values
+            # Inside start_stream(row_idx)
+            cleaned_labels = df['GT'].astype(str).str.strip().str.lower()
+            dense_labels_np = cleaned_labels.map(CLASS_MAP).fillna(-100).values
             
             # Align label lengths with embedding lengths
             if len(dense_labels_np) > src_total:

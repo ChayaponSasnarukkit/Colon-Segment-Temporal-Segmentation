@@ -36,18 +36,15 @@ from tqdm import tqdm
 import random
 import numpy as np
 CLASS_MAP = {
-    'Terminal_Ileum': 0,
-    'Cecum': 1,
-    'Ascending_Colon': 2,
-    'Hepatic_Flexure': 3,
-    'Transverse_Colon': 4,
-    'Splenic_Flexure': 5,
-    'Descending_Colon': 6,
-    'Sigmoid_Colon': 7,
-    'Rectum': 8,
-    'Anal_Canal': 9
+    'outside': 0,
+    'inside': 1, 
+    'ceacum': 2,
+    'ileum': 3,
+    'ascending': 4,
+    'transverse': 5,
+    'descending': 6,
+    'sigmoid': 7, 'rectum': 8,
 }
-
 # --- 1. Custom Loss Functions ---
 
 def compute_temporal_smoothing_loss(logits, labels, ignore_index=-100):
@@ -389,7 +386,7 @@ def main():
 
     train_dataset = MedicalStreamingDataset(
         label_files=splits["train"], 
-        video_root=base_dir, 
+        video_root=features_path, 
         metadata_csv=metadata_csv,
         batch_size_per_worker=1, 
         chunk_size=1500, # 1 minute so we dont need to deal with edge case where context need to be recalculate
@@ -407,7 +404,7 @@ def main():
 
     val_dataset = MedicalStreamingDataset(
         label_files=splits["val"], 
-        video_root=base_dir, 
+        video_root=features_path, 
         metadata_csv=metadata_csv,
         batch_size_per_worker=1, 
         chunk_size=1500, # 60*25=
