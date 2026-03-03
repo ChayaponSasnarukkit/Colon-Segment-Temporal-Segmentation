@@ -164,7 +164,7 @@ class EndoMambaModule(L.LightningModule):
         optimizer_grouped_parameters = [
             {
                 'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
-                'weight_decay': self.config.get("weight_decay", 0.05)
+                'weight_decay': self.config.get("weight_decay", 0.005)
             },
             {
                 'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
@@ -203,80 +203,109 @@ class EndoMambaModule(L.LightningModule):
                 "frequency": 1,
             },
         }
-
+from dataset.cas_locationv2 import CasColonDataset
 def main():
     # 1. Configuration
     # We match these to the arguments required by RawVideoDataModule
+    FOLD=1
+    train_split_csv = f"cv_folds_generated/fold{FOLD}_train.csv"
+    test_split_csv = f"cv_folds_generated/fold{FOLD}_test.csv"
     args = {
         # Model Hyperparameters
         "num_classes": 10,  # Updated to match your 10 anatomy classes
         "lr": 1e-4,
-        "weight_decay": 0.01,
+        "weight_decay": 0.001,
         "pretrained": True,
         
         # Data Hyperparameters
-        "batch_size": 32,       # Lower batch size for video (memory heavy)
+        "batch_size": 8,       # Lower batch size for video (memory heavy)
         "num_workers": 8,
-        "context_length": 2,  # Number of frames (T)
+        "context_length": 32,  # Number of frames (T)
         "downsample_factor": 60, # 1 FPS if video is 60fps
         "height": 224,
         "width": 224,
         
         # Training Hyperparameters
-        "epochs": 5,
+        "epochs": 25,
         "grad_accum_steps": 4, # Effective batch size = 8 * 4 = 32
-        "precision": "16-mixed", # crucial for video training memory
-        "gradient_clip_val": 1.0,
+        # "precision": "16-mixed", # crucial for video training memory
+        # "gradient_clip_val": 1.0,
         
         # Paths (UPDATE THESE)
-        "master_csv_path": "/scratch/lt200353-pcllm/location/cas_colon/Video_Label.csv",
+        # "master_csv_path": "/scratch/lt200353-pcllm/location/cas_colon/Video_Label.csv",
         "video_root": "/scratch/lt200353-pcllm/location/cas_colon/",
+        "train_csv_path": train_split_csv,
+        "val_csv_path": test_split_csv,
         "seed": 42
     }
 
     # 2. Initialize Data Module
     # We use the LightningDataModule wrapper which handles the splitting and loaders
-    dm = RawVideoDataModule(
-        master_csv_path=args["master_csv_path"],
+    train_dataset = CasColonDataset(
+        csv_path=args["train_csv_path"],
         video_root=args["video_root"],
-        batch_size=args["batch_size"],
-        num_workers=args["num_workers"],
-        seed=args["seed"],
-        context_length=args["context_length"],
-        downsample_factor=args["downsample_factor"]
+        cache_root=args["cache_root"],
+        clip_len=args["context_length"],
+        sampling_rate=args["downsample_factor"],
+        stride=args["stride"],
+        mode="train",
+        # crop_size=args["crop_size"]
     )
     
-    # We must call setup() manually here if we want to calculate class weights 
-    # BEFORE passing them to the model (since DM typically sets up in trainer.fit)
-    print("⏳ Setting up data module to calculate class weights...")
-    dm.setup(stage='fit')
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args["batch_size"],
+        shuffle=True,
+        num_workers=args["num_workers"],
+        pin_memory=True,
+        drop_last=True
+    )
+
+    # Validation Set (Assuming same CSV, just using mode='val' logic if implemented, 
+    # or you might split IDs. Here we reuse for demo but typically you split)
+    val_dataset = CasColonDataset(
+        csv_path=args["val_csv_path"],
+        video_root=args["video_root"],
+        cache_root=args["cache_root"],
+        clip_len=args["context_length"],
+        sampling_rate=args["downsample_factor"],
+        stride=args["stride"],
+        mode="test",
+    )
     
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=args["num_workers"],
+        pin_memory=True
+    )
     # 3. Calculate Class Weights for Imbalance
     # We iterate over the created dataset to count labels
-    print("⚖️  Calculating class weights (this might take a moment)...")
-    # Access the underlying dataset created in setup()
-    train_labels = [sample[2] for sample in dm.train_ds.samples] 
-    class_counts = np.bincount(train_labels, minlength=args["num_classes"])
+    # print("⚖️  Calculating class weights (this might take a moment)...")
+    # # Access the underlying dataset created in setup()
+    # train_labels = [sample[2] for sample in dm.train_ds.samples] 
+    # class_counts = np.bincount(train_labels, minlength=args["num_classes"])
     
-    # Standard weighting: Total / (NumClasses * Count)
-    total_samples = len(train_labels)
-    weights = total_samples / (args["num_classes"] * class_counts + 1e-6)
-    class_weights_tensor = torch.tensor(weights, dtype=torch.float32)
+    # # Standard weighting: Total / (NumClasses * Count)
+    # total_samples = len(train_labels)
+    # weights = total_samples / (args["num_classes"] * class_counts + 1e-6)
+    # class_weights_tensor = torch.tensor(weights, dtype=torch.float32)
 
-    print(f"✅ Class Weights calculated: {class_weights_tensor}")
+    # print(f"✅ Class Weights calculated: {class_weights_tensor}")
 
     # 4. Initialize Model
     # We pass total_samples to the model for the scheduler calculation
     model = EndoMambaModule(
         config=args, 
-        class_weights=class_weights_tensor, 
-        all_samples=total_samples
+        # class_weights=class_weights_tensor, 
+        all_samples=len(train_dataset)
     )
 
     # 5. Callbacks
     # Save best model based on macro F1 or AUROC
     checkpoint_cb = ModelCheckpoint(
-        dirpath="/scratch/lt200353-pcllm/location/checkpoints/8fix_endomamba_video_last",
+        dirpath=f"/scratch/lt200353-pcllm/location/checkpoints/32fix_endomamba_video_last{FOLD}",
         filename='{epoch:02d}-{val/F1_macro:.4f}',
         save_top_k=3,
         monitor='val/F1_macro',
@@ -295,11 +324,11 @@ def main():
         max_epochs=args['epochs'],
         accelerator="gpu",
         devices=1,  # Set to -1 for all GPUs
-        precision=args['precision'],
+        # precision=args['precision'],
         logger=logger,
         callbacks=[checkpoint_cb, lr_monitor],
         log_every_n_steps=10,
-        gradient_clip_val=args['gradient_clip_val'],
+        # gradient_clip_val=args['gradient_clip_val'],
         accumulate_grad_batches=args['grad_accum_steps'],
         # Strategy usually needed for multi-gpu video training
         # strategy="ddp_find_unused_parameters_true" 
@@ -308,7 +337,7 @@ def main():
     # 7. Start Training
     # Passing 'dm' automatically handles train/val dataloaders
     print("🚀 Starting Video Training...")
-    trainer.fit(model, datamodule=dm)
+    trainer.fit(model, train_loader, val_loader)
     
     # Optional: Test after training
     # trainer.test(model, datamodule=dm)

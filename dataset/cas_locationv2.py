@@ -82,7 +82,7 @@ class CasColonDataset(Dataset):
         cache_root,        # Path where frames will be extracted (JPGs)
         clip_len=20,       # Number of frames per clip
         sampling_rate=6,   # Dilation: 16 frames cover ~1.0 second (60/4 = 15Hz effective)
-        stride=60,         # Step size: Generate 1 sample every 1s (30 frames)
+        stride=None,         # Step size: Generate 1 sample every 1s (30 frames)
         mode="train",
         extracted_fps=60,  # The FPS of your source video
         crop_size=224,
@@ -94,11 +94,13 @@ class CasColonDataset(Dataset):
         self.csv_path = csv_path
         self.video_root = video_root
         self.cache_root = cache_root
-        
+        if stride is None:
+            self.stride = clip_len
+        else:
+            self.stride = stride
         # Configuration
         self.clip_len = clip_len
         self.sampling_rate = sampling_rate
-        self.stride = stride
         self.mode = mode
         self.extracted_fps = extracted_fps
         self.crop_size = crop_size
