@@ -90,7 +90,8 @@ class EndoMambaModule(L.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        x, y = batch # x shape: (B, C, T, H, W) for video, or (B, C, H, W) for image
+        # buffer, sample['label'], sample['prev_label'], sample['video_id']
+        x, y, _, _ = batch # x shape: (B, C, T, H, W) for video, or (B, C, H, W) for image
         
         # Ensure y is correct shape/type for CE Loss
         if y.ndim > 1:
