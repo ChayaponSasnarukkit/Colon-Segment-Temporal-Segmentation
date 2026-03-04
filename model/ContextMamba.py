@@ -142,12 +142,12 @@ class ContextMambav2_for_inference(nn.Module):
                 module.layer_idx = idx
                 idx += 1
 
-    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True, inference_params=None):
+    def forward(self, vision_embeddings, compressed_ctx, pass_states=None, labels=None, use_temporal_scale=True, inference_params=None):
         device = vision_embeddings.device
         dtype = vision_embeddings.dtype
 
         # 1. Compress historical context (Bidirectional, no cache needed)
-        compressed_ctx = self.compressor(contexts)
+        # compressed_ctx = self.compressor(contexts)
 
         # 2. Extract baseline query features -> [B, M, D]
         x, next_states = self.base_model(

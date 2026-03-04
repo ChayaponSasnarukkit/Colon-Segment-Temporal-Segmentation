@@ -49,10 +49,15 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
             if B > 1:
                 print("Warning: Batch size > 1 detected. Cache resets might bleed across streams.")
 
+            precomputed_ctx = None
+            if final_ctx is not None:
+                precomputed_ctx = model.compressor(final_ctx)
+
             # Handle Video Boundaries
             if final_mask[0].item(): 
                 inference_params.key_value_memory_dict.clear()
                 inference_params.seqlen_offset = 0
+                print("STARTING NEW VIDEO", flush=True)
                 
             # Simulate Frame-by-Frame Real-Time Streaming
             for t in range(Chunk_Len):
@@ -73,7 +78,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 
                 logits_wo_future, future_logits, logits_w_future, next_states = model(
                     vision_embeddings=frame_t,
-                    contexts=final_ctx, 
+                    compressed_ctx=precomputed_ctx, 
                     use_temporal_scale=True,
                     inference_params=inference_params
                 )
