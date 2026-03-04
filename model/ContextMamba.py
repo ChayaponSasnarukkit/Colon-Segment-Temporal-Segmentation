@@ -4,6 +4,236 @@ from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, 
 import torch
 import torch.nn as nn
 
+class ContextMambav2_for_inference(nn.Module):
+    def __init__(
+        self,
+        base_model: MixerModel,
+        d_model: int,
+        num_classes: int,
+        num_future: int,
+        vision_dim = None,
+        compression_ratio: float = 300.0, # 30*10 = 6*5*2*5 = 3*2*5*2*5 =20, 15 # 240 for cas
+        target_fps: float = 30.0,
+        context_fps: float = 4.0,
+        query_fps: float = 30.0,
+        dropout: float = 0.1,
+        future_fps: float = None,
+        use_multihead = False,
+        **factory_kwargs
+    ):
+        super().__init__()
+        # Store architecture variables
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.num_future = num_future
+        self.compression_ratio = compression_ratio
+        self.target_fps = target_fps
+        self.context_fps = context_fps
+        self.query_fps = query_fps
+        if vision_dim is None:
+            vision_dim = d_model
+
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
+        # Sub-modules
+        # self.base_model = MixerModel(
+        #     d_model=config.d_model,
+        #     n_layer=config.n_layer,
+        #     d_intermediate=config.d_intermediate,
+        #     vision_dim=vision_dim,
+        #     ssm_cfg=config.ssm_cfg,
+        #     rms_norm=config.rms_norm,
+        #     fused_add_norm=config.fused_add_norm,
+        #     **factory_kwargs
+        # ) # return hidden, next
+        self.base_model = base_model
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15]) # 24, 10 for cas
+        self.fusion = QueryAwareMambaBlock(d_model=d_model)
+
+        # Anticipation: predict the next num_future second ahead using context and current
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+
+        # Classifiers
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
+            hidden_dim = in_dim * hidden_expansion
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),                    # 1. Normalization
+                nn.Linear(in_dim, hidden_dim),           # 3. Enrichment MLP (Layer 1)
+                nn.GELU(),                               # Activation
+                nn.Dropout(dropout),                     # 2. Dropout
+                nn.Linear(hidden_dim, out_classes)       # 3. Enrichment MLP (Head)
+            )
+
+        # Classifiers (Upgraded to MLP heads)
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
+        self.future_classifier = build_mlp_head(d_model, num_classes)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        
+        # Projection layer for fusing current state and anticipated future
+        # Added Norm, Activation, and Dropout to enrich this fusion step as well
+        self.future_cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, 
+            num_heads=8,          # 8 heads is standard for d_model=1024
+            dropout=dropout, 
+            batch_first=True
+        )
+        
+        # 2. Projection and Gating
+        self.future_fusion_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Gate to control information flow and prevent "phase bleeding"
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
+    
+    def compute_normalized_dts(self, B, M, K, device, dtype):
+        """
+        Calculates the normalized time scales based on the maximum temporal span.
+        M = query sequence length
+        K = scene/context sequence length
+        """
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) # 240*30/4=60*30=1800
+        
+        s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+        dt_s_value = s_equiv_frames / max_equiv_frames
+        
+        q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+        dt_q_value = q_equiv_frames / max_equiv_frames
+        
+        dt_s = torch.full((B, K, 1), dt_s_value, device=device, dtype=dtype)
+        dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+        
+        return dt_s, dt_q
+    
+    def assign_layer_indices(self):
+        """
+        REQUIRED for inference cache! Call this once after initializing your model.
+        It assigns a unique index to every Mamba sub-module so they don't overwrite 
+        each other's states in the inference_params dictionary.
+        """
+        idx = 0
+        for module in self.modules():
+            if hasattr(module, "layer_idx"):
+                module.layer_idx = idx
+                idx += 1
+
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True, inference_params=None):
+        device = vision_embeddings.device
+        dtype = vision_embeddings.dtype
+
+        # 1. Compress historical context (Bidirectional, no cache needed)
+        compressed_ctx = self.compressor(contexts)
+
+        # 2. Extract baseline query features -> [B, M, D]
+        x, next_states = self.base_model(
+            vision_embeddings=vision_embeddings, 
+            pass_states=pass_states, 
+            inference_params=inference_params # Pass cache down
+        )
+
+        B, M, D = x.shape
+        is_decode = inference_params is not None and inference_params.seqlen_offset > 0
+
+        if compressed_ctx is None:
+            max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+            q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+            dt_q_value = q_equiv_frames / max_equiv_frames
+            dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+            
+            enhanced_embeddings = x 
+            full_history = enhanced_embeddings 
+            full_dt_s = dt_q 
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+            future_token_q = future_token 
+
+        else:
+            K = compressed_ctx.shape[1]
+            dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
+        
+            # 3. Mamba Cross-Fusion
+            enhanced_embeddings = self.fusion(
+                F_s=compressed_ctx,
+                F_q=x,
+                delta_t_s=None,
+                delta_t_q=None,
+                inference_params=inference_params
+            )
+
+            # 4. Anticipation Head Setup
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+
+            if is_decode:
+                # DECODE PHASE: Only feed the new token! 
+                # Mamba's cache already remembers `compressed_ctx` from prefill.
+                full_history = enhanced_embeddings
+                full_dt_s = dt_q
+            else:
+                # PREFILL PHASE: Feed the full history sequence.
+                full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) 
+                full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             
+            
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params)
+            
+            if is_decode:
+                # If decoding, the output sequence is already just length 1.
+                pass
+            else:
+                # Discard context predictions during prefill.
+                future_token = future_token[:, K:, :, :] 
+
+            future_token_q = future_token
+
+        # Baseline predictions
+        logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
+        future_logits = self.future_classifier(future_token_q)
+
+        # Cross Attention + Residual Gate
+        B, M, num_future, D = future_token_q.shape
+        q = enhanced_embeddings.view(B * M, 1, D)
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        attended_future = attn_output.view(B, M, D)
+        
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1) 
+        fusion_projection = self.future_fusion_proj(fused_features)                
+        gate = self.fusion_gate(fused_features)                                    
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        logits_w_future = self.classifier_w_future(future_aware_embeddings)
+        
+        return logits_wo_future, future_logits, logits_w_future, next_states
+
 class ContextMambav2(nn.Module):
     def __init__(
         self,

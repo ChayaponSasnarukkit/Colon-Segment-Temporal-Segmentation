@@ -766,7 +766,7 @@ class QueryAwareMambaBlock(nn.Module):
         # Projects the processed scene features for the cross-interaction update
         self.linear_F = nn.Linear(d_model, d_model)
 
-    def forward(self, F_s, F_q, delta_t_s=None, delta_t_q=None):
+    def forward(self, F_s, F_q, delta_t_s=None, delta_t_q=None, inference_params=None):
         """
         Args:
             F_s: 3D scene features, shape (B, K, C)
@@ -784,7 +784,7 @@ class QueryAwareMambaBlock(nn.Module):
         # Pass the newly added delta_t arguments to the time-scale-aware blocks
         # Output shapes: (B, K, C) and (B, M, C)
         y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s) 
-        y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q)
+        y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q, inference_params=inference_params)
         
         # 3. Cross-Interaction (Replaces Steps 11-12 in Algorithm 2)
         # Calculate attention/affinity matrix: (B, M, C) @ (B, C, K) -> (B, M, K)
@@ -823,7 +823,7 @@ class CausalQueryAwareMambaBlock(nn.Module):
         # --- Value Projection ---
         self.linear_F = nn.Linear(d_model, d_model)
 
-    def forward(self, F_s, delta_t_s=None, delta_t_q=None):
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None, inference_params=None):
         """
         Args:
             F_s: 3D scene features, shape (B, L, D)
@@ -903,7 +903,7 @@ class CausalQueryAwareMambaBlockv2(nn.Module):
         self.linear_V = nn.Linear(d_model, d_model)
         self.linear_Q = nn.Linear(d_model, d_model)
 
-    def forward(self, F_s, delta_t_s=None, delta_t_q=None):
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None, inference_params=None):
         B, L, D = F_s.shape
         M = self.num_queries
         
@@ -917,7 +917,7 @@ class CausalQueryAwareMambaBlockv2(nn.Module):
         # 2. Independent Causal Scanning
         # y_s: (B, L, D)
         # y_q: (B, M, D)
-        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s) 
+        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s, inference_params=inference_params) 
         y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q)
         
         # 3. Key and Value Projection for Scene Features
