@@ -323,7 +323,9 @@ class CasColonDataset(Dataset):
                 # If your task requires ignoring background, you might skip here,
                 # BUT that will cause the assertion to fail.
                 # Ideally, you assign a BACKGROUND_CLASS_ID (e.g., 0) instead of skipping.
-                if label == -1: print("wrong Label") # Example: Set to background
+                if label == -1: 
+                    continue
+                    print("wrong Label") # Example: Set to background
                 if prev_label == -1: print("wrong prev Label")
 
                 sample = {
