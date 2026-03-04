@@ -448,6 +448,25 @@ def main():
     for param in full_model.parameters():
         param.requires_grad = True
 
+
+    def print_model_size(model):
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+        print(f"Total Parameters: {total_params / 1e6:.2f} M")
+        print(f"Trainable Parameters: {trainable_params / 1e6:.2f} M")
+    
+        # Calculate approximate memory footprint (assuming FP32 / 4 bytes per param)
+        mem_mb = total_params * 4 / (1024 ** 2)
+        print(f"Model Size (FP32): {mem_mb:.2f} MB")
+    
+    print_model_size(model.backbone)
+    print_model_size(full_model)
+
+    print_model_size(full_model.compressor)
+    print_model_size(full_model.fusion)
+    print_model_size(full_model.anticipation_head)
+    return
     # --- Training Configuration ---
     epochs = 50
     patience = 50 

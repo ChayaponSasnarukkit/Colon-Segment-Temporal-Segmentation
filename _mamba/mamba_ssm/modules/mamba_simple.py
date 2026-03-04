@@ -18,23 +18,20 @@ from causal_conv1d import causal_conv1d_fn
 import causal_conv1d_cuda
 import selective_scan_cuda
 
-import sys
-sys.path.append('/home/tqy/endomamba/videomamba/_mamba/mamba_ssm')
+#try:
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, mamba_inner_fn_no_out_proj
+#except ImportError:
+    #selective_scan_fn, mamba_inner_fn, bimamba_inner_fn, mamba_inner_fn_no_out_proj = None, None, None, None
 
-try:
-    from ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, bimamba_inner_fn, mamba_inner_fn_no_out_proj
-except ImportError:
-    selective_scan_fn, mamba_inner_fn, bimamba_inner_fn, mamba_inner_fn_no_out_proj = None, None, None, None
+#try:
+from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+#except ImportError:
+    #selective_state_update = None
 
-try:
-    from ops.triton.selective_state_update import selective_state_update
-except ImportError:
-    selective_state_update = None
-
-try:
-    from ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
-except ImportError:
-    RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+#try:
+from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
+#except ImportError:
+    #RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
 class Mamba(nn.Module):
@@ -239,9 +236,9 @@ class Mamba(nn.Module):
                     self.D.float(),
                     delta_bias=self.dt_proj.bias.float(),
                     delta_softplus=True,
-                    ssm_state=ssm_state,
-                    conv_state=conv_state,
-                    return_last_state=return_last_state
+                    #ssm_state=ssm_state,
+                    #conv_state=conv_state,
+                    #return_last_state=return_last_state
                 )
                 if return_last_state:
                     out, ssm_state, conv_state = out

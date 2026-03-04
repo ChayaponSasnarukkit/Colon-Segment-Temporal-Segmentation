@@ -26,7 +26,7 @@ class MambaRMSNorm(nn.Module):
     
 class MambaMLP(nn.Module):
     """Standard Feed-Forward Network with Dropout."""
-    def __init__(self, hidden_dim, mlp_ratio=4.0, dropout=0.1):
+    def __init__(self, hidden_dim, mlp_ratio=2.0, dropout=0.1):
         super().__init__()
         intermediate_dim = int(hidden_dim * mlp_ratio)
         self.fc1 = nn.Linear(hidden_dim, intermediate_dim)
@@ -52,7 +52,7 @@ class GatedFusionMambaBlock(nn.Module):
         expand=2,
         head_dim=64,
         use_mlp=True,     
-        mlp_ratio=4.0,     
+        mlp_ratio=2.0,     
         dropout=0.1
     ):
         super().__init__()
@@ -168,7 +168,7 @@ class GatedFusionMambaBlockv2(nn.Module):
         expand=2,
         head_dim=64,
         use_mlp=True,     
-        mlp_ratio=4.0,     
+        mlp_ratio=2.0,#4.0,     
         dropout=0.1
     ):
         super().__init__()

@@ -19,8 +19,8 @@ import math
 
 #import sys, os
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
-from mamba_ssm.modules.mamba_simple import Mamba
-from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
+from _mamba.mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 
 
 import torch
@@ -596,7 +596,7 @@ class EndoMamba(nn.Module):
             Tensor: Output logits of shape (B, T, num_classes).
             Optional inference_params if provided.
         """
-        x, inference_params = self.forward_features(x, inference_params)
+        x, _, inference_params = self.forward_features(x, inference_params)
         if self.with_head:
             B, T, N, C = x.shape
             if self.with_cls_token:

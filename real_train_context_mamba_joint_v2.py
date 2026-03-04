@@ -140,7 +140,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         # --- Custom Temporal Constraints ---
         # Apply constraints to the final, most refined predictions (logits_w_future)
         smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-        jump_loss = transition_penalty_loss(logits_w_future, labels)
+        jump_loss = 0.0 #transition_penalty_loss(logits_w_future, labels)
         
         # Combine all objectives
         loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
@@ -160,7 +160,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         
         if step % 10 == 0:
             print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
-                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, Jump: {jump_loss.item():.4f})")
+                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, ") #Jump: {jump_loss.item():.4f})")
             
     return total_loss / (steps if steps > 0 else 1)
 
@@ -229,7 +229,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         
         ce_loss = (loss_wo + loss_w + loss_future) / 3.0
         smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-        jump_loss = transition_penalty_loss(logits_w_future, labels)
+        jump_loss = 0.0 #transition_penalty_loss(logits_w_future, labels)
         
         loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
         
@@ -238,7 +238,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         total_loss_w += loss_w.item()
         total_loss_future += loss_future.item()
         total_loss_smooth += smooth_loss.item()
-        total_loss_jump += jump_loss.item()
+        total_loss_jump += 0.0 #jump_loss.item()
         steps += 1
         worker_states[w_id] = detach_states(next_states)
         
@@ -379,8 +379,8 @@ def main():
         video_root=features_path, 
         metadata_csv=metadata_csv,
         batch_size_per_worker=1, 
-        chunk_size=1500, # 1 minute so we dont need to deal with edge case where context need to be recalculate
-        target_fps=25,     # Desired Training FPS (New Argument)
+        chunk_size=300, # 1 minute so we dont need to deal with edge case where context need to be recalculate
+        target_fps=5,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=True,
@@ -397,9 +397,9 @@ def main():
         video_root=features_path, 
         metadata_csv=metadata_csv,
         batch_size_per_worker=1, 
-        chunk_size=1500, # 60*25=
+        chunk_size=300, # 60*25=// 60*5=300
         
-        target_fps=25,     # Desired Training FPS (New Argument)
+        target_fps=5,     # Desired Training FPS (New Argument)
         
         # Context / Memory Bank Config
         use_memory_bank=True,
@@ -457,7 +457,7 @@ def main():
     # Save path for the new joint-training run
     save_dir = f"/scratch/lt200353-pcllm/location/real_colon/full_shuffle/fold{FOLD}/" 
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best.pth")
+    best_model_path = os.path.join(save_dir, "5fps_best.pth")
 
     # Optimizer & Scheduler
     # AdamW is highly recommended for SSMs/Transformers
@@ -472,13 +472,13 @@ def main():
 
     # Optimizer with Differential Learning Rates
     optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': 5e-5}, # 10x smaller for backbone
-        {'params': head_params,     'lr': 5e-5}  # Standard for head
+        {'params': backbone_params, 'lr': 1e-4}, # 10x smaller for backbone
+        {'params': head_params,     'lr': 1e-4}  # Standard for head
     ], weight_decay=1e-3)
     
     # Reduce learning rate by half if validation loss stops improving for 2 epochs
-    WARMUP_EPOCHS = 10
-    MAX_EPOCHS = 50 # Must match your training loop epochs
+    WARMUP_EPOCHS = 5
+    MAX_EPOCHS = 25 # Must match your training loop epochs
     
     # Phase 1: Linear Warmup (start at 1% of lr, go to 100% over 5 epochs)
     scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
@@ -520,7 +520,7 @@ def main():
         # 1. Train
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=4, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.25, lambda_jump=0.0)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.1, lambda_jump=0.0, accumulation_steps=32)
         
         # 2. Validate (Now receiving metrics)
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss)
