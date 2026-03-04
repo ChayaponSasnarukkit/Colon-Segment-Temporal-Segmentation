@@ -64,16 +64,16 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 frame_t = final_curr[:, t:t+1, :] 
                 
                 # --- 1. Measure Feature Extraction Latency ---
-                #torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 start_feat = time.perf_counter()
                 
                 dummy = dummy_model(dummy_image)
                 
-                #torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 end_feat = time.perf_counter()
                 
                 # --- 2. Measure Mamba Sequence Model Latency ---
-                #torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 start_model = time.perf_counter()
                 
                 logits_wo_future, future_logits, logits_w_future, next_states = model(
@@ -83,7 +83,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                     inference_params=inference_params
                 )
                 
-                #torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 end_model = time.perf_counter()
                 
                 # Tell Mamba we moved forward 1 step
@@ -91,6 +91,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 
                 # Accumulate time (skipping the first frame for GPU warmup)
                 if total_frames > 0: 
+                    print("IGNORE TIME OF FIRST FRAME", flush=True)
                     total_time_feat += (end_feat - start_feat)
                     total_time_model += (end_model - start_model)
                 
