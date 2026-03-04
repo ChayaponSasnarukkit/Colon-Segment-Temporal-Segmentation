@@ -91,10 +91,13 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 
                 # Accumulate time (skipping the first frame for GPU warmup)
                 if total_frames > 0: 
-                    print("IGNORE TIME OF FIRST FRAME", flush=True)
                     total_time_feat += (end_feat - start_feat)
                     total_time_model += (end_model - start_model)
-                
+                else:
+                    print((end_feat - start_feat), (end_model - start_model))
+                    print("IGNORE TIME OF FIRST FRAME", flush=True)
+                if total_frames == 20:
+                    print((end_feat - start_feat), (end_model - start_model), flush=True)
                 total_frames += 1
 
             if batch_idx % 10 == 0 and total_frames > 1:
