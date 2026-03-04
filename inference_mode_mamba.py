@@ -6,18 +6,8 @@ from model.CMamba import MambaTemporalSegmentation
 from dataset.cas_locationv3 import MedicalStreamingDataset
 from train_context_mamba_joint_v2 import MambaTemporalConfig
 from torch.utils.data import DataLoader
-from extract_dinov3 import DINOv3FeatureExtractor
-
-import time
-import torch
-from mamba_ssm.utils.generation import InferenceParams
-from model.ContextMamba import ContextMambav2_for_inference
-from model.CMamba import MambaTemporalSegmentation
-from dataset.cas_locationv3 import MedicalStreamingDataset
-from train_context_mamba_joint_v2 import MambaTemporalConfig
-from torch.utils.data import DataLoader
-from extract_dinov3 import DINOv3FeatureExtractor
-
+from extract_dinov3 import DINOv3FeatureExtractor, MODEL_ID
+from tqdm import tqdm
 def evaluate_streaming_fps(model, dataloader, device="cuda"):
     """
     Evaluates the real-time frame-by-frame processing speed of the ContextMamba model.
@@ -28,7 +18,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
     model.to(device)
     
     # Setup dummy feature extractor
-    dummy_model = DINOv3FeatureExtractor().to(device)
+    dummy_model = DINOv3FeatureExtractor(MODEL_ID).to(device)
     dummy_model.eval() 
     dummy_image = torch.rand(1, 3, 224, 224, device=device)
     
@@ -47,7 +37,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
     print("Starting streaming inference benchmark...")
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
+        for batch_idx, batch in tqdm(enumerate(dataloader)):
             final_curr, final_ctx, final_lbl, final_future_lbl, final_mask, final_ctx_mask, worker_id = batch
             
             final_curr = final_curr.to(device)
@@ -69,16 +59,16 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 frame_t = final_curr[:, t:t+1, :] 
                 
                 # --- 1. Measure Feature Extraction Latency ---
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 start_feat = time.perf_counter()
                 
                 dummy = dummy_model(dummy_image)
                 
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 end_feat = time.perf_counter()
                 
                 # --- 2. Measure Mamba Sequence Model Latency ---
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 start_model = time.perf_counter()
                 
                 logits_wo_future, future_logits, logits_w_future, next_states = model(
@@ -88,7 +78,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                     inference_params=inference_params
                 )
                 
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 end_model = time.perf_counter()
                 
                 # Tell Mamba we moved forward 1 step
@@ -163,7 +153,7 @@ def main():
         loss_fn=loss_fn
     )
     
-    full_model = ContextMambav2_for_inference(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3, use_multihead=True).to('cuda')
+    full_model = ContextMambav2_for_inference(base_model=model.backbone, d_model=1024, num_classes=10, num_future=3, use_multihead=False).to('cuda')
     evaluate_streaming_fps(full_model, val_loader)
 
 if __name__ == "__main__":

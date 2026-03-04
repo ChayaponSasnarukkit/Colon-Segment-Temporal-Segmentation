@@ -14,9 +14,13 @@ conda activate myenv                    # Activate your environment
 echo $CUDA_HOME
 which python
 
-export HF_HUB_CACHE="/home/csasnaru/.cache/huggingface"
-export HF_HOME="/home/csasnaru/.cache/huggingface"
-export HF_DATASETS_CACHE="/home/csasnaru/.cache/huggingface"
+#export HF_HUB_CACHE="/home/csasnaru/.cache/huggingface"
+#export HF_HOME="/home/csasnaru/.cache/huggingface"
+#export HF_DATASETS_CACHE="/home/csasnaru/.cache/huggingface"
+
+export HF_HUB_CACHE="/scratch/lt200353-pcllm/.cache/huggingface"
+export HF_HOME="/scratch/lt200353-pcllm/.cache/huggingface"
+export HF_DATASETS_CACHE="/scratch/lt200353-pcllm/.cache/huggingface"
 
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
@@ -34,4 +38,4 @@ export LD_LIBRARY_PATH=$TORCH_LIB:/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/12
 # We explicitly exclude libtorch_python.so to avoid the symbol error.
 export LD_PRELOAD=$TORCH_LIB/libc10.so:$TORCH_LIB/libtorch.so:$TORCH_LIB/libtorch_cuda.so
 # 4. Run the training (Pass all variables)
-srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_context_mamba_joint_v2.py
+srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python inference_mode_mamba.py
