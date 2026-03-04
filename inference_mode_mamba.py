@@ -51,7 +51,17 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
 
             precomputed_ctx = None
             if final_ctx is not None:
+                # prevent weird initialize
                 precomputed_ctx = model.compressor(final_ctx)
+                # time the second time
+                torch.cuda.synchronize()
+                start_compress = time.perf_counter()
+                precomputed_ctx = model.compressor(final_ctx)
+                torch.cuda.synchronize()
+                end_compress = time.perf_counter()
+                additional_latency_per_minutes = end_compress - start_compress
+                print(additional_latency_per_minutes)
+                total_time_model+=additional_latency_per_minutes
 
             # Handle Video Boundaries
             if final_mask[0].item(): 
