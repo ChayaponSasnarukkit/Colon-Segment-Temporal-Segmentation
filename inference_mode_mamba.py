@@ -33,6 +33,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
     # Separate timing accumulators
     total_time_feat = 0.0
     total_time_model = 0.0
+    total_time_compress = 0.0
 
     print("Starting streaming inference benchmark...")
 
@@ -50,7 +51,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 print("Warning: Batch size > 1 detected. Cache resets might bleed across streams.")
 
             precomputed_ctx = None
-            if final_ctx is not None:
+            if final_ctx is not None and final_ctx_mask.sum()>0:
                 # prevent weird initialize
                 precomputed_ctx = model.compressor(final_ctx)
                 # time the second time
@@ -59,9 +60,10 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 precomputed_ctx = model.compressor(final_ctx)
                 torch.cuda.synchronize()
                 end_compress = time.perf_counter()
-                additional_latency_per_minutes = end_compress - start_compress
-                print(additional_latency_per_minutes)
-                total_time_model+=additional_latency_per_minutes
+                compressor_latency = end_compress - start_compress
+                print(f"Compressor Latency for chunk: {compressor_latency:.4f}s")
+                total_time_compress += compressor_latency
+                #total_time_model+=additional_latency_per_minutes
 
             # Handle Video Boundaries
             if final_mask[0].item(): 
@@ -70,7 +72,7 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                 print("STARTING NEW VIDEO", flush=True)
                 
             # Simulate Frame-by-Frame Real-Time Streaming
-            for t in range(Chunk_Len):
+            for t in tqdm(range(Chunk_Len)):
                 frame_t = final_curr[:, t:t+1, :] 
                 
                 # --- 1. Measure Feature Extraction Latency ---
@@ -110,11 +112,11 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
                     print((end_feat - start_feat), (end_model - start_model), flush=True)
                 total_frames += 1
 
-            if batch_idx % 10 == 0 and total_frames > 1:
+            if batch_idx % 3 == 0 and total_frames > 1:
                 # Calculate running totals
                 running_time_feat = max(total_time_feat, 1e-5)
                 running_time_model = max(total_time_model, 1e-5)
-                running_total_time = running_time_feat + running_time_model
+                running_total_time = running_time_feat + running_time_model + total_time_compress
                 
                 current_fps = (total_frames - 1) / running_total_time
                 print(f"Processed {total_frames} frames... Running Total FPS: {current_fps:.2f}")
@@ -125,7 +127,8 @@ def evaluate_streaming_fps(model, dataloader, device="cuda"):
     
     avg_latency_feat_ms = (total_time_feat / valid_frames) * 1000
     avg_latency_model_ms = (total_time_model / valid_frames) * 1000
-    total_latency_ms = avg_latency_feat_ms + avg_latency_model_ms
+    avg_latency_compress_ms = (total_time_compress / valid_frames) * 1000
+    total_latency_ms = avg_latency_feat_ms + avg_latency_model_ms + avg_latency_compress_ms
     
     avg_total_fps = 1000.0 / total_latency_ms if total_latency_ms > 0 else 0.0
     
