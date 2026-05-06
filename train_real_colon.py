@@ -375,13 +375,14 @@ def main():
     if USE_CMERT_HEAD:
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
+        print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
     epochs = 50
-    patience = 25  
+    patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/realcolon_fold{FOLD}"
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/long_no_smooth_and_small_batch_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 
@@ -391,7 +392,7 @@ def main():
     if cfg_scheduler_choice == "reduceonplateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     elif cfg_scheduler_choice == "cosine_with_warmup":
-        warmup_epochs = 5
+        warmup_epochs = 3
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
         scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
@@ -412,8 +413,8 @@ def main():
         # Apply virtual_batch_size to accumulation_steps
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
-            accumulation_steps=cfg_virtual_batch_size, 
-            lambda_smooth=0.5, lambda_jump=0.0, with_future=True
+            accumulation_steps=2*cfg_virtual_batch_size, 
+            lambda_smooth=0.0, lambda_jump=0.0, with_future=True
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)
@@ -439,7 +440,7 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            print(f"\nNew best validation loss ({best_val_loss:.4f})! Saving model...")
+            print(f"\nNew best validation loss ({val_loss:.4f})! Saving model...")
             torch.save(full_model.state_dict(), best_model_path)
         else:
             patience_counter += 1
