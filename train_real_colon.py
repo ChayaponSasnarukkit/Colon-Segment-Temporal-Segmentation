@@ -1,4 +1,6 @@
 import os
+import json
+import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,7 +85,6 @@ def safe_ce_loss(logits, targets, criterion):
         return logits.sum() * 0.0 
     return criterion(logits, targets)
 
-
 # --- Config Flags ---
 USE_CMERT_HEAD = False
 USE_TEMPORAL_SCALE = True
@@ -95,7 +96,6 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
     steps = 0
     worker_states = {}
     
-    # NOTE: Disabled previous f1_based_weights as the class distribution changed.
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
     transition_penalty_loss = TransitionPenaltyLoss().to(device)
 
@@ -172,9 +172,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
     steps = 0
     worker_states = {}
     
-    # NOTE: Disabled f1_based_weights
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    
     all_preds, all_labels = [], []
 
     for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
@@ -276,14 +274,30 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 def main():
+    # --- Parse Hparams from Config File ---
+    parser = argparse.ArgumentParser(description="Train MambaTemporalSegmentation with Hparams Config")
+    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
+    args = parser.parse_args()
+
+    with open(args.config, 'r') as f:
+        hparams = json.load(f)
+
+    cfg_lr = hparams.get("lr", 1e-4)
+    cfg_weight_decay = hparams.get("weight_decay", 1e-2)
+    cfg_scheduler_choice = hparams.get("scheduler_choice", "reduceonplateau").lower()
+    cfg_virtual_batch_size = hparams.get("virtual_batch_size", 16)
+    cfg_freeze = hparams.get("freeze", False)
+    cfg_pretrain_dir = hparams.get("pretrain_dir", "")
+
+    print(f"Loaded Hyperparameters: {hparams}")
+
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
-    freeze = False
     
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
-    SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" # Update if your text files are elsewhere
+    SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
     FOLD = 1
     
     train_dataset = RealColonStreamingDataset(
@@ -292,11 +306,9 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='train',
-        chunk_size=300, # 300 frames @ 5 FPS = 1 minute
-        
+        chunk_size=300, 
         fps=5,            
         target_fps=5,     
-        
         use_memory_bank=True,
         context_seconds=600, 
         context_fps=5,
@@ -312,11 +324,9 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='test',
-        chunk_size=300, # 300 frames @ 5 FPS = 1 minute
-        
+        chunk_size=300, 
         fps=5,            
         target_fps=5,     
-        
         use_memory_bank=True,
         context_seconds=600, 
         context_fps=5,
@@ -339,20 +349,29 @@ def main():
         loss_fn=loss_fn
     )
     
-    # NOTE: Be careful loading weights trained on 10 classes onto a model 
-    # predicting a different set of 10 classes if the meaning changed entirely.
-    checkpoint_path = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/base_shuffle/fold{FOLD}/best_mamba_model.pth"
-    if os.path.exists(checkpoint_path):
+    # --- Pretrain & Freeze Safeguard Logic ---
+    is_training_from_scratch = True
+    checkpoint_path = os.path.join(cfg_pretrain_dir, "best_mamba_model.pth") if cfg_pretrain_dir else ""
+
+    if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading weights from {checkpoint_path}...")
         model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+        is_training_from_scratch = False
     else:
-        print(f"Checkpoint not found at {checkpoint_path}. Starting from scratch.")
+        print(f"Checkpoint not found or not provided at: '{checkpoint_path}'. Starting from scratch.")
+        is_training_from_scratch = True
         
     model.to(device)
-    if freeze:
-        for param in model.parameters():
-            param.requires_grad = False
-        print("The based short-term memory are frozen!")
+
+    if cfg_freeze:
+        if is_training_from_scratch:
+            print("WARNING: Cannot freeze base memory when training from scratch. Forcing freeze=False.")
+            cfg_freeze = False
+        else:
+            for param in model.parameters():
+                param.requires_grad = False
+            print("The base short-term memory layers are frozen!")
+
     if USE_CMERT_HEAD:
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
@@ -366,8 +385,18 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 
-    optimizer = torch.optim.AdamW(full_model.parameters(), lr=1e-4, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    # --- Setup Optimizer and Schedulers from Config ---
+    optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
+    
+    if cfg_scheduler_choice == "reduceonplateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    elif cfg_scheduler_choice == "cosine_with_warmup":
+        warmup_epochs = 5
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
+    else:
+        raise ValueError(f"Unsupported scheduler choice: {cfg_scheduler_choice}")
 
     IDX_TO_CLASS = {v: k for k, v in CLASS_MAP.items()}
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
@@ -377,8 +406,15 @@ def main():
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=16, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0, with_future=True)
+        # Apply virtual_batch_size to num_workers
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=cfg_virtual_batch_size, worker_init_fn=seed_worker, generator=g)
+        
+        # Apply virtual_batch_size to accumulation_steps
+        train_loss = train_one_epoch(
+            full_model, train_loader, optimizer, device, 
+            accumulation_steps=cfg_virtual_batch_size, 
+            lambda_smooth=0.5, lambda_jump=0.0, with_future=True
+        )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)
         
@@ -393,7 +429,12 @@ def main():
             class_name = IDX_TO_CLASS.get(idx, f"Class_{idx}")
             print(f"    - {class_name:<15}: {f1:.4f}")
         
-        scheduler.step(val_loss)
+        # --- Scheduler Stepping Logic ---
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(val_loss)
+        else:
+            # For SequentialLR (Cosine with Warmup), step without arguments
+            scheduler.step()
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
