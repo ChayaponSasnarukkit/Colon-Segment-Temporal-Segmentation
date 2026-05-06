@@ -11,7 +11,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 # --- Import your models and the NEW Dataset ---
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMamba, ContextMambaCmeRT
+from model.ContextMamba import ContextMambaForRealColon, ContextMambaCmeRT
 
 # IMPORTANT: Make sure to save the newly created dataset class in a file, e.g., dataset.real_colon
 from dataset.real_locationv2 import RealColonStreamingDataset 
@@ -27,7 +27,7 @@ CLASS_MAP = {
     "descending": 6,
     "sigmoid": 7,
     "rectum": 8,
-    "uncertain": 9,
+    "uncertain": -100,
 }
 
 @dataclass
@@ -356,7 +356,7 @@ def main():
     if USE_CMERT_HEAD:
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
-        full_model = ContextMamba(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
+        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
     epochs = 50
     patience = 12  
