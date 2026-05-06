@@ -88,7 +88,7 @@ def safe_ce_loss(logits, targets, criterion):
 USE_CMERT_HEAD = False
 USE_TEMPORAL_SCALE = True
 
-def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4, 
+def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True):
     model.train()
     total_loss = 0.0
@@ -279,12 +279,12 @@ def main():
     set_seed(42)
     g = torch.Generator()
     g.manual_seed(42)
-    freeze = True
+    freeze = False
     
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
-    SPLIT_DIR = "./cv_folds_generated" # Update if your text files are elsewhere
-    FOLD = 5
+    SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" # Update if your text files are elsewhere
+    FOLD = 1
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 
@@ -352,14 +352,14 @@ def main():
     if freeze:
         for param in model.parameters():
             param.requires_grad = False
-    
+        print("The based short-term memory are frozen!")
     if USE_CMERT_HEAD:
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
     epochs = 50
-    patience = 12  
+    patience = 25  
     patience_counter = 0
     best_val_loss = float('inf')
     save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/realcolon_fold{FOLD}"
@@ -377,7 +377,7 @@ def main():
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
         train_dataset.set_epoch(epoch)
-        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, worker_init_fn=seed_worker, generator=g)
+        train_loader = DataLoader(train_dataset, batch_size=None, num_workers=16, worker_init_fn=seed_worker, generator=g)
         train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=0.5, lambda_jump=0.0, with_future=True)
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)

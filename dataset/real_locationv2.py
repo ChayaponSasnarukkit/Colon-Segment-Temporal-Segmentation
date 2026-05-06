@@ -20,7 +20,7 @@ LABEL_MAP = {
     "uncertain": 9,
 }
 NUM_CLASSES = len(LABEL_MAP)
-
+import os.path as osp
 class RealColonStreamingDataset(IterableDataset):
     def __init__(self, 
                  video_root, 
@@ -57,7 +57,28 @@ class RealColonStreamingDataset(IterableDataset):
         self.split_dir = split_dir
         self.fold = fold
         self.phase = phase
-        self.sessions = self._load_split_sessions() if split_dir else set()
+        # --- Read Text Files for Splits (Integrated Logic) ---
+        self.sessions = []
+        if self.phase == 'train':
+            # Combine train and valid for training, ignoring validation phase entirely
+            split_files = [f'fold{self.fold}_train.txt', f'fold{self.fold}_valid.txt']
+        else:
+            # Strictly use test set for evaluation
+            split_files = [f'fold{self.fold}_test.txt']
+
+        if self.split_dir:
+            for file_name in split_files:
+                file_path = osp.join(self.split_dir, file_name)
+                if osp.exists(file_path):
+                    with open(file_path, 'r') as f:
+                        # Read lines, strip newline characters, and ignore empty lines
+                        lines = [line.strip() for line in f.readlines() if line.strip()]
+                        self.sessions.extend(lines)
+                else:
+                    print(f"Warning: Split file not found: {file_path}")
+
+        # --- Auto-discover dataset ---
+        self.df = self._build_dataset_dataframe()
         
         # --- Auto-discover dataset ---
         self.df = self._build_dataset_dataframe()
@@ -83,7 +104,34 @@ class RealColonStreamingDataset(IterableDataset):
         self.future_offsets = torch.arange(1, self.num_future + 1) * fps
 
     def _build_dataset_dataframe(self):
-        """Scans the directory for .pt files and builds an internal dataframe."""
+        data = []
+        files = os.listdir(self.video_root)
+
+        pt_files = [f for f in files if f.endswith('.pt')]
+        pt_files.sort()
+
+        for pt_file in pt_files:
+            vid_id = pt_file.replace('.pt', '')
+
+            # --- Filter by Split ---
+            # If self.sessions is populated, skip videos not in the target split
+            if self.sessions and vid_id not in self.sessions:
+                continue
+
+            lbl_file = f"{vid_id}_labels.npy"
+            lbl_path = osp.join(self.video_root, lbl_file)
+
+            if osp.exists(lbl_path):
+                lbl_array = np.load(lbl_path, mmap_mode='r')
+                total_frames = lbl_array.shape[0]
+                data.append({'VideoID': vid_id, 'TotalFrames': total_frames})
+
+        if not data:
+            raise ValueError(f"No valid .pt and _labels.npy pairs found for fold {self.fold} ({self.phase}) in {self.video_root}")
+
+        return pd.DataFrame(data)
+    """def _build_dataset_dataframe(self):
+        #Scans the directory for .pt files and builds an internal dataframe.
         data = []
         files = os.listdir(self.video_root)
         
@@ -106,7 +154,7 @@ class RealColonStreamingDataset(IterableDataset):
         if not data:
             raise ValueError(f"No valid .pt and _labels.npy pairs found in {self.video_root}")
             
-        return pd.DataFrame(data)
+        return pd.DataFrame(data)"""
 
     def _load_images(self, video_id, frame_indices):
         """ Reads a list of frame indices from disk (Images). """
