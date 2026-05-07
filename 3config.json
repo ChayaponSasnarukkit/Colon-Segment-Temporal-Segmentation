@@ -5,6 +5,6 @@
     "virtual_batch_size": 32,
     "freeze": false,
     "pretrain_dir": "/scratch/lt200353-pcllm/location/real_colon/checkpoints/base_shuffle/fold1",
-    "weighted_loss": "smoothed",
+    "weighted_loss": "inverse",
     "save_dir": ""
 }

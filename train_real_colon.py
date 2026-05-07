@@ -96,7 +96,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
     steps = 0
     worker_states = {}
     
-    if weighted:
+    if weighted is not None:
         # You must calculate these based on your train split, but it will look like this:
         # (Heavier weights for rare classes, smaller weights for common classes)
         #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
@@ -181,7 +181,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
     total_loss, total_loss_wo, total_loss_w, total_loss_future, total_loss_smooth, total_loss_jump = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     steps = 0
     worker_states = {}
-    if weighted:
+    if weighted is not None:
         # You must calculate these based on your train split, but it will look like this:
         # (Heavier weights for rare classes, smaller weights for common classes)
         #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
@@ -570,7 +570,7 @@ def main():
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
     
     if cfg_scheduler_choice == "reduceonplateau":
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3) # should used 2, but try 3
     elif cfg_scheduler_choice == "cosine_with_warmup":
         warmup_epochs = 2
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
@@ -603,7 +603,7 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.10, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
+            lambda_smooth=0.15, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=class_weights_tensor)
