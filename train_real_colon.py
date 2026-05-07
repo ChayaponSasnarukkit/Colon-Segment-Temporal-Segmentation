@@ -90,7 +90,7 @@ USE_CMERT_HEAD = False
 USE_TEMPORAL_SCALE = True
 
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16, 
-                    lambda_smooth=0.5, lambda_jump=0.0, with_future=True, weighted=False):
+                    lambda_smooth=0.5, lambda_jump=0.0, with_future=True, weighted=None):
     model.train()
     total_loss = 0.0
     steps = 0
@@ -102,8 +102,8 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
         #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
         #realcolon_weights = torch.tensor([0.554, 0.591, 0.869, 1.025, 1.336, 0.934, 1.682, 1.102, 0.906]).to(device)
         #realcolon_weights = torch.tensor([0.28, 0.36, 0.86, 2.49, 0.89, 0.30, 1.60, 0.32, 1.47]).to(device) # damp
-        realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
-        criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
+        # realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
+        criterion = nn.CrossEntropyLoss(weight=weighted, ignore_index=-100)
     else:
 
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
@@ -176,7 +176,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
 
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
-             lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=False):
+             lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=None):
     model.eval()
     total_loss, total_loss_wo, total_loss_w, total_loss_future, total_loss_smooth, total_loss_jump = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     steps = 0
@@ -187,8 +187,8 @@ def validate(model, dataloader, device, transition_penalty_loss,
         #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
         #realcolon_weights = torch.tensor([0.554, 0.591, 0.869, 1.025, 1.336, 0.934, 1.682, 1.102, 0.906]).to(device)
         #realcolon_weights = torch.tensor([0.28, 0.36, 0.86, 2.49, 0.89, 0.30, 1.60, 0.32, 1.47]).to(device) # damp
-        realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
-        criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
+        # realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
+        criterion = nn.CrossEntropyLoss(weight=weighted, ignore_index=-100)
     else:
 
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
@@ -276,81 +276,86 @@ def validate(model, dataloader, device, transition_penalty_loss,
     val_f1_per_class = f1_score(all_labels, all_preds, average=None, labels=list(range(model.num_classes)), zero_division=0) if len(all_labels) > 0 else []
 
     return avg_loss, val_acc, val_f1_macro, val_f1_per_class
-"""
-@torch.no_grad()
-def cache_predictions(model, dataloader, device, save_path, with_future=True):
+
+import numpy as np
+import os.path as osp
+import torch
+
+def compute_weights_from_dataset(train_dataset, label_map, method='smoothed'):
+    """
+    Computes class weights safely from the dataset's DataFrame.
     
-    #Runs inference on the dataset, computes raw probabilities,
-    #and saves them alongside ground truth labels and reset masks.
+    Args:
+        train_dataset (RealColonStreamingDataset): Your instantiated training dataset.
+        label_map (dict): The LABEL_MAP dictionary mapping strings to integers.
+        method (str): 'smoothed' (recommended), 'mfb', or 'inverse'.
+        
+    Returns:
+        torch.Tensor: Computed class weights.
+        np.ndarray: The raw counts for each class (useful for debugging).
+    """
+    print(f"Calculating {method} weights from {len(train_dataset.df)} training videos...")
     
-    model.eval()
-    all_probs = []
-    all_labels = []
-    all_reset_masks = [] # <-- NEW: List to hold reset masks
-    worker_states = {}
+    num_classes = len(label_map)
+    # Initialize an array to hold the total counts for classes 0 through 8
+    class_counts = np.zeros(num_classes, dtype=np.int64)
+    
+    # Iterate through the DataFrame (which is already safely filtered to the train split)
+    for _, row in train_dataset.df.iterrows():
+        vid_id = row['VideoID']
+        lbl_path = osp.join(train_dataset.video_root, f"{vid_id}_labels.npy")
+        
+        # Load the labels array
+        if osp.exists(lbl_path):
+            labels = np.load(lbl_path)
+            
+            # 1. Map string labels to integers if the .npy contains strings
+            if labels.dtype.kind in {'U', 'S', 'O'}:  # Unicode, String, Object
+                # Filter out any labels not in the map (like "uncertain")
+                valid_mask = np.isin(labels, list(label_map.keys()))
+                mapped_labels = np.array([label_map[lbl] for lbl in labels[valid_mask]])
+            
+            # 2. Or, if the .npy already contains integers, just filter valid classes
+            else:
+                # Keep only classes 0 to NUM_CLASSES-1 (filters out -100 or 999)
+                valid_mask = (labels >= 0) & (labels < num_classes)
+                mapped_labels = labels[valid_mask]
+            
+            # Fast, memory-efficient counting for this specific video
+            unique_classes, counts = np.unique(mapped_labels, return_counts=True)
+            
+            # Add this video's counts to the global total
+            for cls_idx, count in zip(unique_classes, counts):
+                class_counts[int(cls_idx)] += count
+                
+        else:
+            print(f"Warning: Label file not found: {lbl_path}")
 
-    for step, batch in enumerate(tqdm(dataloader, desc="Caching Predictions")):
-        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
-
-        vision_embeddings = vision_embeddings.to(device)
-        contexts = contexts.to(device)
-        labels = labels.to(device)
-        reset_mask = reset_mask.to(device)
-        context_masks = context_masks.to(device)
-
-        actual_K = context_masks[0].sum().int().item()
-        valid_contexts = contexts[:, :actual_K, :]
-
-        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
-        current_states = worker_states.get(w_id, None)
-
-        if current_states is not None:
-            current_states = apply_reset_mask(current_states, reset_mask)
-
-        # Forward pass
-        logits_wo_future, future_logits, logits_w_future, next_states = model(
-            vision_embeddings=vision_embeddings,
-            contexts=valid_contexts,
-            pass_states=current_states,
-            labels=labels,
-            use_temporal_scale=USE_TEMPORAL_SCALE
-        )
-
-        # Choose which logits to use for probabilities
-        logits = logits_w_future if with_future else logits_wo_future
-
-        # Apply Softmax to get raw probabilities
-        probs = F.softmax(logits, dim=-1)
-
-        # Flatten tensors
-        probs_flat = probs.view(-1, model.num_classes).cpu().numpy()
-        labels_flat = labels.view(-1).cpu().numpy()
-        reset_mask_flat = reset_mask.view(-1).cpu().numpy() # <-- NEW: Flatten mask
-
-        # Filter out ignored labels (-100)
-        valid_indices = labels_flat != -100
-
-        all_probs.append(probs_flat[valid_indices])
-        all_labels.append(labels_flat[valid_indices])
-        all_reset_masks.append(reset_mask_flat[valid_indices]) # <-- NEW: Store filtered mask
-
-        # Update worker states for streaming
-        worker_states[w_id] = detach_states(next_states)
-
-    # Concatenate lists into final numpy arrays
-    all_probs = np.concatenate(all_probs, axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
-    all_reset_masks = np.concatenate(all_reset_masks, axis=0) # <-- NEW: Concatenate masks
-
-    # Save to disk as a compressed .npz file (added reset_masks)
-    np.savez_compressed(
-        save_path,
-        probs=all_probs,
-        labels=all_labels,
-        reset_masks=all_reset_masks # <-- NEW: Save to file
-    )
-    print(f"\n✅ Successfully saved raw probabilities {all_probs.shape}, labels {all_labels.shape}, and reset masks {all_reset_masks.shape} to: {save_path}")
-"""
+    # --- Math Application ---
+    # Prevent division by zero if a class happens to be entirely missing
+    safe_counts = np.maximum(class_counts, 1) 
+    total_samples = np.sum(safe_counts)
+    frequencies = safe_counts / total_samples
+    
+    if method == 'smoothed':
+        raw_weights = np.sqrt(total_samples / safe_counts)
+        final_weights = raw_weights * (num_classes / np.sum(raw_weights))
+        
+    elif method == 'mfb':
+        median_freq = np.median(frequencies)
+        final_weights = median_freq / frequencies
+        
+    elif method == 'inverse':
+        raw_weights = total_samples / safe_counts
+        final_weights = raw_weights * (num_classes / np.sum(raw_weights))
+        
+    else:
+        raise ValueError("Method must be 'smoothed', 'mfb', or 'inverse'")
+        
+    print("Class Counts:", class_counts)
+    print("Final Weights:", np.round(final_weights, 4))
+    
+    return torch.tensor(final_weights, dtype=torch.float32).to('cuda' if torch.cuda.is_available() else 'cpu'), class_counts
 
 @torch.no_grad()
 def cache_predictions(model, dataloader, device, save_path, with_future=True):
@@ -578,6 +583,15 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=None, num_workers=1)
     transition_penalty_loss = TransitionPenaltyLoss().to(device)
     
+    if cfg_weighted_loss:
+        class_weights_tensor, raw_counts = compute_weights_from_dataset(
+            train_dataset=train_dataset, 
+            label_map=CLASS_MAP, 
+            method=cfg_weighted_loss
+        )
+        print(class_weights_tensor, raw_counts)
+    else:
+        class_weights_tensor = None
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
         
@@ -589,10 +603,10 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.10, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
+            lambda_smooth=0.10, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
         )
         
-        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=cfg_weighted_loss)
+        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=class_weights_tensor)
         
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Train Loss:  {train_loss:.4f}")
