@@ -382,7 +382,7 @@ def main():
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/long_no_smooth_and_small_batch_realcolon_fold{FOLD}"
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/no_future_long_no_smooth_and_small_batch_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 
@@ -414,7 +414,7 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.0, lambda_jump=0.0, with_future=True
+            lambda_smooth=0.0, lambda_jump=0.0, with_future=False
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)
