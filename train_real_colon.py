@@ -392,7 +392,7 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
-    epochs = 25
+    epochs = 50
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
