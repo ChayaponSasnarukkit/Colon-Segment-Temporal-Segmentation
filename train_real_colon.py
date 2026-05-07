@@ -90,13 +90,20 @@ USE_CMERT_HEAD = False
 USE_TEMPORAL_SCALE = True
 
 def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16, 
-                    lambda_smooth=0.5, lambda_jump=0.0, with_future=True):
+                    lambda_smooth=0.5, lambda_jump=0.0, with_future=True, weighted=False):
     model.train()
     total_loss = 0.0
     steps = 0
     worker_states = {}
     
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    if weighted:
+        # You must calculate these based on your train split, but it will look like this:
+        # (Heavier weights for rare classes, smaller weights for common classes)
+        realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
+    else:
+
+        criterion = nn.CrossEntropyLoss(ignore_index=-100)
     transition_penalty_loss = TransitionPenaltyLoss().to(device)
 
     optimizer.zero_grad() 
@@ -125,7 +132,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
             contexts=valid_contexts,
             pass_states=current_states,
             labels=labels,
-            use_temporal_scale=USE_TEMPORAL_SCALE
+            use_temporal_scale=True
         )
         
         if with_future:
@@ -166,13 +173,19 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
 
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
-             lambda_smooth=0.0, lambda_jump=0.0, with_future=True):
+             lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=False):
     model.eval()
     total_loss, total_loss_wo, total_loss_w, total_loss_future, total_loss_smooth, total_loss_jump = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     steps = 0
     worker_states = {}
-    
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    if weighted:
+        # You must calculate these based on your train split, but it will look like this:
+        # (Heavier weights for rare classes, smaller weights for common classes)
+        realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
+    else:
+
+        criterion = nn.CrossEntropyLoss(ignore_index=-100)
     all_preds, all_labels = [], []
 
     for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
@@ -288,6 +301,7 @@ def main():
     cfg_virtual_batch_size = hparams.get("virtual_batch_size", 16)
     cfg_freeze = hparams.get("freeze", False)
     cfg_pretrain_dir = hparams.get("pretrain_dir", "")
+    cfg_weighted_loss = hparams.get("weighted_loss", False)
 
     print(f"Loaded Hyperparameters: {hparams}")
 
@@ -378,7 +392,7 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
-    epochs = 50
+    epochs = 25
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
@@ -414,10 +428,10 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.0, lambda_jump=0.0, with_future=False
+            lambda_smooth=0.5, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
         )
         
-        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True)
+        val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=cfg_weighted_loss)
         
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Train Loss:  {train_loss:.4f}")

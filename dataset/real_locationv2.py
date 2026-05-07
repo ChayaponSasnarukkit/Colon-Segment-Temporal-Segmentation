@@ -17,7 +17,7 @@ LABEL_MAP = {
     "descending": 6,
     "sigmoid": 7,
     "rectum": 8,
-    "uncertain": 9,
+    # "uncertain": -100,
 }
 NUM_CLASSES = len(LABEL_MAP)
 import os.path as osp
@@ -80,9 +80,6 @@ class RealColonStreamingDataset(IterableDataset):
         # --- Auto-discover dataset ---
         self.df = self._build_dataset_dataframe()
         
-        # --- Auto-discover dataset ---
-        self.df = self._build_dataset_dataframe()
-        
         # --- FPS / Stride Logic ---
         self.fps = fps
         self.target_fps = target_fps
@@ -130,31 +127,6 @@ class RealColonStreamingDataset(IterableDataset):
             raise ValueError(f"No valid .pt and _labels.npy pairs found for fold {self.fold} ({self.phase}) in {self.video_root}")
 
         return pd.DataFrame(data)
-    """def _build_dataset_dataframe(self):
-        #Scans the directory for .pt files and builds an internal dataframe.
-        data = []
-        files = os.listdir(self.video_root)
-        
-        # Find all .pt files (e.g., "001-001.pt")
-        pt_files = [f for f in files if f.endswith('.pt')]
-        pt_files.sort()
-        
-        for pt_file in pt_files:
-            vid_id = pt_file.replace('.pt', '')
-            lbl_file = f"{vid_id}_labels.npy"
-            lbl_path = os.path.join(self.video_root, lbl_file)
-            
-            # Use label length to determine TotalFrames
-            if os.path.exists(lbl_path):
-                # Using mmap_mode='r' to quickly read shape without loading full array
-                lbl_array = np.load(lbl_path, mmap_mode='r') 
-                total_frames = lbl_array.shape[0]
-                data.append({'VideoID': vid_id, 'TotalFrames': total_frames})
-                
-        if not data:
-            raise ValueError(f"No valid .pt and _labels.npy pairs found in {self.video_root}")
-            
-        return pd.DataFrame(data)"""
 
     def _load_images(self, video_id, frame_indices):
         """ Reads a list of frame indices from disk (Images). """
