@@ -352,7 +352,7 @@ def main():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_action_classes = len(CLASS_MAP)
-    config = MambaTemporalConfig(d_model=1024, n_layer=8)
+    config = MambaTemporalConfig(d_model=1024, n_layer=4)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100) 
     
     model = MambaTemporalSegmentation(
