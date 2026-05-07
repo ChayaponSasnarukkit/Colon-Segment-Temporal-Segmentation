@@ -709,13 +709,20 @@ class ContextMamba(nn.Module):
         
         return logits_wo_future, future_logits, logits_w_future, next_states
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
 class ContextMambaForRealColon(nn.Module):
     def __init__(
         self,
-        base_model: MixerModel,
+        base_model, # Assuming MixerModel type
         d_model: int,
         num_classes: int,
         num_future: int,
+        vision_dim = None,          # v2 Addition
+        use_multihead = False,      # v2 Addition
         compression_ratio: float = 300.0, #5*60
         target_fps: float = 5.0,
         context_fps: float = 5.0,
@@ -733,34 +740,40 @@ class ContextMambaForRealColon(nn.Module):
         self.target_fps = target_fps
         self.context_fps = context_fps
         self.query_fps = query_fps
+        
+        # v2 Addition: Handle vision_dim fallback
+        if vision_dim is None:
+            vision_dim = d_model
 
         if future_fps:
             self.future_fps = future_fps
         else:
             self.future_fps = 1
+            
         # Sub-modules
-        # self.base_model = MixerModel(
-        #     d_model=config.d_model,
-        #     n_layer=config.n_layer,
-        #     d_intermediate=config.d_intermediate,
-        #     vision_dim=vision_dim,
-        #     ssm_cfg=config.ssm_cfg,
-        #     rms_norm=config.rms_norm,
-        #     fused_add_norm=config.fused_add_norm,
-        #     **factory_kwargs
-        # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressor(hidden_dim=d_model, frames_per_query=[20, 15])
+        
+        # v2 Upgrade: MultiLevelCompressorv2
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15])
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
-        # Anticipation: predict the next num_future second ahead using context and current
-        self.anticipation_head = CausalQueryAwareMambaBlock(
-            d_model=d_model, 
-            num_queries=num_future, 
-            d_state=128, 
-            d_conv=4, 
-            expand=2
-        )
+        # v2 Upgrade: Anticipation head conditional logic (v2 blocks)
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
 
         # Classifiers
         def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
@@ -779,7 +792,6 @@ class ContextMambaForRealColon(nn.Module):
         self.classifier_w_future = build_mlp_head(d_model, num_classes)
         
         # Projection layer for fusing current state and anticipated future
-        # Added Norm, Activation, and Dropout to enrich this fusion step as well
         self.future_cross_attn = nn.MultiheadAttention(
             embed_dim=d_model, 
             num_heads=8,          # 8 heads is standard for d_model=1024
@@ -809,7 +821,7 @@ class ContextMambaForRealColon(nn.Module):
         M = query sequence length
         K = scene/context sequence length
         """
-        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) # 240*30/4=60*30=1800
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
         
         s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
         dt_s_value = s_equiv_frames / max_equiv_frames
@@ -860,19 +872,17 @@ class ContextMambaForRealColon(nn.Module):
             dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
         
             # 3. Mamba Cross-Fusion
-
             enhanced_embeddings = self.fusion(
                 F_s=compressed_ctx,
                 F_q=x,
                 delta_t_s=None,
                 delta_t_q=None
             )
-            # 4. Anticipation Head Setup
-            # Fix: Concatenate along the sequence dimension (dim=1)
-            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
-            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             # [B, K+M, 1]
             
-            # Fix: Create a properly shaped tensor for the future queries [B, num_future, 1]
+            # 4. Anticipation Head Setup
+            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
+            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                              # [B, K+M, 1]
+            
             dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
             
@@ -881,26 +891,18 @@ class ContextMambaForRealColon(nn.Module):
                 future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
             else:
                 future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
+                
             # We only want the anticipation corresponding to the M current query steps.
             # We discard the predictions made over the K context prefix.
             future_token = future_token[:, K:, :, :] # [B, M, num_future, D]
 
-            # 5. Future-Aware Fusion (TODO Completed)
+            # 5. Future-Aware Fusion
             future_token_q = future_token # [B, M, num_future, D]
 
         # Baseline predictions
         logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
-
         future_logits = self.future_classifier(future_token)
         
-        # Pool the future predictions to get a single context vector per timestep
-        # summarized_future = future_token_q.mean(dim=2) # [B, M, D]
-        
-        # Concatenate and project back to original dimension
-        # fused_features = torch.cat([enhanced_embeddings, summarized_future], dim=-1) # [B, M, 2D]
-        # fusion_projection = self.future_fusion_proj(fused_features)            # [B, M, D]
-        # future_aware_embeddings = enhanced_embeddings + fusion_projection
-
         B, M, num_future, D = future_token_q.shape
 
         # 2. Reshape for MultiheadAttention
@@ -909,9 +911,7 @@ class ContextMambaForRealColon(nn.Module):
         q = enhanced_embeddings.view(B * M, 1, D)
         
         # Keys/Values (Future Anticipation): [B*M, num_future, D]
-        # NOTE: Using .detach() here stops the gradient tug-of-war. The anticipation head 
-        # is forced to only learn from loss_future, not from loss_w.
-        # kv = future_token_q.detach().view(B * M, num_future, D) 
+        # NOTE: Using .detach() here stops the gradient tug-of-war.
         kv = future_token_q.view(B * M, num_future, D) 
         
         # 3. Apply Cross Attention
