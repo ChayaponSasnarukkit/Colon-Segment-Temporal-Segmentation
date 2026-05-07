@@ -99,7 +99,10 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
     if weighted:
         # You must calculate these based on your train split, but it will look like this:
         # (Heavier weights for rare classes, smaller weights for common classes)
-        realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        #realcolon_weights = torch.tensor([0.554, 0.591, 0.869, 1.025, 1.336, 0.934, 1.682, 1.102, 0.906]).to(device)
+        #realcolon_weights = torch.tensor([0.28, 0.36, 0.86, 2.49, 0.89, 0.30, 1.60, 0.32, 1.47]).to(device) # damp
+        realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
         criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
     else:
 
@@ -181,7 +184,10 @@ def validate(model, dataloader, device, transition_penalty_loss,
     if weighted:
         # You must calculate these based on your train split, but it will look like this:
         # (Heavier weights for rare classes, smaller weights for common classes)
-        realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        #realcolon_weights = torch.tensor([1.2, 1.5, 3.0, 8.0, 2.5, 1.0, 4.0, 1.0, 5.0]).to(device)
+        #realcolon_weights = torch.tensor([0.554, 0.591, 0.869, 1.025, 1.336, 0.934, 1.682, 1.102, 0.906]).to(device)
+        #realcolon_weights = torch.tensor([0.28, 0.36, 0.86, 2.49, 0.89, 0.30, 1.60, 0.32, 1.47]).to(device) # damp
+        realcolon_weights = torch.tensor([0.48, 0.55, 0.93, 1.84, 1.09, 0.63, 1.50, 0.72, 1.28]).to(device) #avg
         criterion = nn.CrossEntropyLoss(weight=realcolon_weights, ignore_index=-100)
     else:
 
@@ -270,6 +276,161 @@ def validate(model, dataloader, device, transition_penalty_loss,
     val_f1_per_class = f1_score(all_labels, all_preds, average=None, labels=list(range(model.num_classes)), zero_division=0) if len(all_labels) > 0 else []
 
     return avg_loss, val_acc, val_f1_macro, val_f1_per_class
+"""
+@torch.no_grad()
+def cache_predictions(model, dataloader, device, save_path, with_future=True):
+    
+    #Runs inference on the dataset, computes raw probabilities,
+    #and saves them alongside ground truth labels and reset masks.
+    
+    model.eval()
+    all_probs = []
+    all_labels = []
+    all_reset_masks = [] # <-- NEW: List to hold reset masks
+    worker_states = {}
+
+    for step, batch in enumerate(tqdm(dataloader, desc="Caching Predictions")):
+        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
+
+        vision_embeddings = vision_embeddings.to(device)
+        contexts = contexts.to(device)
+        labels = labels.to(device)
+        reset_mask = reset_mask.to(device)
+        context_masks = context_masks.to(device)
+
+        actual_K = context_masks[0].sum().int().item()
+        valid_contexts = contexts[:, :actual_K, :]
+
+        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+        current_states = worker_states.get(w_id, None)
+
+        if current_states is not None:
+            current_states = apply_reset_mask(current_states, reset_mask)
+
+        # Forward pass
+        logits_wo_future, future_logits, logits_w_future, next_states = model(
+            vision_embeddings=vision_embeddings,
+            contexts=valid_contexts,
+            pass_states=current_states,
+            labels=labels,
+            use_temporal_scale=USE_TEMPORAL_SCALE
+        )
+
+        # Choose which logits to use for probabilities
+        logits = logits_w_future if with_future else logits_wo_future
+
+        # Apply Softmax to get raw probabilities
+        probs = F.softmax(logits, dim=-1)
+
+        # Flatten tensors
+        probs_flat = probs.view(-1, model.num_classes).cpu().numpy()
+        labels_flat = labels.view(-1).cpu().numpy()
+        reset_mask_flat = reset_mask.view(-1).cpu().numpy() # <-- NEW: Flatten mask
+
+        # Filter out ignored labels (-100)
+        valid_indices = labels_flat != -100
+
+        all_probs.append(probs_flat[valid_indices])
+        all_labels.append(labels_flat[valid_indices])
+        all_reset_masks.append(reset_mask_flat[valid_indices]) # <-- NEW: Store filtered mask
+
+        # Update worker states for streaming
+        worker_states[w_id] = detach_states(next_states)
+
+    # Concatenate lists into final numpy arrays
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+    all_reset_masks = np.concatenate(all_reset_masks, axis=0) # <-- NEW: Concatenate masks
+
+    # Save to disk as a compressed .npz file (added reset_masks)
+    np.savez_compressed(
+        save_path,
+        probs=all_probs,
+        labels=all_labels,
+        reset_masks=all_reset_masks # <-- NEW: Save to file
+    )
+    print(f"\n✅ Successfully saved raw probabilities {all_probs.shape}, labels {all_labels.shape}, and reset masks {all_reset_masks.shape} to: {save_path}")
+"""
+
+@torch.no_grad()
+def cache_predictions(model, dataloader, device, save_path, with_future=True):
+    """
+    Runs inference on the dataset, computes raw probabilities,
+    and saves them alongside ground truth labels and reset masks.
+    """
+    model.eval()
+    all_probs = []
+    all_labels = []
+    all_reset_masks = []
+    worker_states = {}
+
+    for step, batch in enumerate(tqdm(dataloader, desc="Caching Predictions")):
+        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
+
+        vision_embeddings = vision_embeddings.to(device)
+        contexts = contexts.to(device)
+        labels = labels.to(device)
+        reset_mask = reset_mask.to(device)
+        context_masks = context_masks.to(device)
+
+        actual_K = context_masks[0].sum().int().item()
+        valid_contexts = contexts[:, :actual_K, :]
+
+        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+        current_states = worker_states.get(w_id, None)
+
+        if current_states is not None:
+            current_states = apply_reset_mask(current_states, reset_mask)
+
+        # Forward pass
+        logits_wo_future, future_logits, logits_w_future, next_states = model(
+            vision_embeddings=vision_embeddings,
+            contexts=valid_contexts,
+            pass_states=current_states,
+            labels=labels,
+            use_temporal_scale=USE_TEMPORAL_SCALE
+        )
+
+        # Choose which logits to use for probabilities
+        logits = logits_w_future if with_future else logits_wo_future
+        probs = F.softmax(logits, dim=-1)
+
+        # --- FIX: Convert chunk-level reset_mask to frame-level ---
+        B, L = labels.shape
+        # Create an array of False for the whole sequence length
+        frame_reset_mask = torch.zeros((B, L), dtype=torch.bool, device=device)
+        # Apply the reset flag ONLY to the very first frame of this chunk
+        frame_reset_mask[:, 0] = reset_mask.bool().view(-1)
+
+        # Flatten tensors
+        probs_flat = probs.view(-1, model.num_classes).cpu().numpy()
+        labels_flat = labels.view(-1).cpu().numpy()
+        reset_mask_flat = frame_reset_mask.view(-1).cpu().numpy() # Now size 600!
+
+        # Filter out ignored labels (-100)
+        valid_indices = labels_flat != -100
+
+        all_probs.append(probs_flat[valid_indices])
+        all_labels.append(labels_flat[valid_indices])
+        all_reset_masks.append(reset_mask_flat[valid_indices])
+
+        # Update worker states for streaming
+        worker_states[w_id] = detach_states(next_states)
+
+    # Concatenate lists into final numpy arrays
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+    all_reset_masks = np.concatenate(all_reset_masks, axis=0)
+
+    # Save to disk as a compressed .npz file
+    np.savez_compressed(
+        save_path,
+        probs=all_probs,
+        labels=all_labels,
+        reset_masks=all_reset_masks
+    )
+    print(f"\n✅ Successfully saved raw probabilities {all_probs.shape}, labels {all_labels.shape}, and reset masks {all_reset_masks.shape} to: {save_path}")
+
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -396,9 +557,9 @@ def main():
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/realcolon_fold{FOLD}"
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/mid_smoothing_dampw_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "large_batch16best_mamba_model.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
@@ -428,7 +589,7 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
+            lambda_smooth=0.10, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=cfg_weighted_loss)
@@ -462,6 +623,26 @@ def main():
             if patience_counter >= patience:
                 print("Early stopping triggered. Halting training.")
                 break
+    print("\n--- Starting Post-Training Analysis Cache ---")
+    
+    # Load the best model weights
+    if os.path.exists(best_model_path):
+        print(f"Loading best model from {best_model_path}")
+        full_model.load_state_dict(torch.load(best_model_path, map_location=device))
+    else:
+        print("Warning: Best model path not found. Using current model state.")
+
+    # Define where to save the analysis data
+    cache_save_path = os.path.join(save_dir, f"predictions_fold{FOLD}.npz")
+    
+    # Run the caching function on the validation loader
+    cache_predictions(
+        model=full_model, 
+        dataloader=val_loader, 
+        device=device, 
+        save_path=cache_save_path, 
+        with_future=True
+    )
 
 if __name__ == "__main__":
     main()
