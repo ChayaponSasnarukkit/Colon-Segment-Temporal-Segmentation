@@ -1,8 +1,8 @@
 {
-    "lr": 2e-4,
-    "weight_decay": 1e-3,
-    "scheduler_choice": "reduceonplateau",
-    "virtual_batch_size": 16,
+    "lr": 1e-4,
+    "weight_decay": 1e-2,
+    "scheduler_choice": "cosine_with_warmup",
+    "virtual_batch_size": 2,
     "freeze": false,
     "pretrain_dir": "/scratch/lt200353-pcllm/location/real_colon/checkpoints/base_shuffle/fold1",
     "weighted_loss": false,

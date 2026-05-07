@@ -723,9 +723,9 @@ class ContextMambaForRealColon(nn.Module):
         num_future: int,
         vision_dim = None,          # v2 Addition
         use_multihead = False,      # v2 Addition
-        compression_ratio: float = 300.0, #5*60
+        compression_ratio: float = 120.0, #1fps*60second*2minutes
         target_fps: float = 5.0,
-        context_fps: float = 5.0,
+        context_fps: float = 1.0,
         query_fps: float = 5.0,
         dropout: float = 0.1,
         future_fps: float = None,
@@ -754,7 +754,7 @@ class ContextMambaForRealColon(nn.Module):
         self.base_model = base_model
         
         # v2 Upgrade: MultiLevelCompressorv2
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15])
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[12, 10])
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # v2 Upgrade: Anticipation head conditional logic (v2 blocks)

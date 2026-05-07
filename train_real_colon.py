@@ -320,12 +320,12 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='train',
-        chunk_size=300, 
+        chunk_size=600, 
         fps=5,            
         target_fps=5,     
         use_memory_bank=True,
         context_seconds=600, 
-        context_fps=5,
+        context_fps=1,
         shuffle=True,
         use_emb=True,
         emb_dim=1024,
@@ -338,12 +338,12 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='test',
-        chunk_size=300, 
+        chunk_size=600, 
         fps=5,            
         target_fps=5,     
         use_memory_bank=True,
         context_seconds=600, 
-        context_fps=5,
+        context_fps=1,
         shuffle=False,
         use_emb=True,
         emb_dim=1024,
@@ -392,7 +392,7 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
-    epochs = 50
+    epochs = 25
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
