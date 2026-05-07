@@ -29,7 +29,7 @@ CLASS_MAP = {
     "descending": 6,
     "sigmoid": 7,
     "rectum": 8,
-    "uncertain": -100,
+    #"uncertain": -100,
 }
 
 @dataclass
@@ -146,11 +146,11 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
         
             ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
             smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
+            jump_loss = 0#transition_penalty_loss(logits_w_future, labels)
         else:
             ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
             smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
+            jump_loss = 0#transition_penalty_loss(logits_w_future, labels)
         
         loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
         loss = loss / accumulation_steps
@@ -167,7 +167,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
         
         if step % 10 == 0:
             print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
-                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, Jump: {jump_loss.item():.4f})")
+                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}"), #Jump: {jump_loss.item():.4f})")
             
     return total_loss / (steps if steps > 0 else 1)
 
@@ -226,14 +226,14 @@ def validate(model, dataloader, device, transition_penalty_loss,
 
             ce_loss = (0.75*loss_wo + 1.5*loss_w + 0.75*loss_future) / 3.0
             smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
+            #jump_loss = 0#transition_penalty_loss(logits_w_future, labels)
         else:
             ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
             loss_wo = ce_loss
             smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
+            #jump_loss = 0#transition_penalty_loss(logits_w_future, labels)
         
-        loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
+        loss = ce_loss + (lambda_smooth * smooth_loss) #+ (lambda_jump * jump_loss)
         
         total_loss += loss.item()
         total_loss_wo += loss_wo.item()
@@ -241,7 +241,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
             total_loss_w += loss_w.item()
             total_loss_future += loss_future.item()
         total_loss_smooth += smooth_loss.item()
-        total_loss_jump += jump_loss.item()
+        #total_loss_jump += jump_loss.item()
         steps += 1
         worker_states[w_id] = detach_states(next_states)
         
@@ -263,7 +263,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
     if with_future:
         print(f"  val_loss_future: {total_loss_future / steps:.4f}")
     print(f"  val_loss_smooth: {total_loss_smooth / steps:.4f}")
-    print(f"  val_loss_jump:   {total_loss_jump / steps:.4f}")
+    #print(f"  val_loss_jump:   {total_loss_jump / steps:.4f}")
     
     val_acc = accuracy_score(all_labels, all_preds) if len(all_labels) > 0 else 0.0
     val_f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0) if len(all_labels) > 0 else 0.0
@@ -392,11 +392,11 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
         
-    epochs = 25
+    epochs = 50
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/no_future_long_no_smooth_and_small_batch_realcolon_fold{FOLD}"
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best_mamba_model.pth")
 
@@ -406,7 +406,7 @@ def main():
     if cfg_scheduler_choice == "reduceonplateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     elif cfg_scheduler_choice == "cosine_with_warmup":
-        warmup_epochs = 3
+        warmup_epochs = 2
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
         scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
@@ -428,7 +428,7 @@ def main():
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
             accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.5, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
+            lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=cfg_weighted_loss
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=cfg_weighted_loss)
