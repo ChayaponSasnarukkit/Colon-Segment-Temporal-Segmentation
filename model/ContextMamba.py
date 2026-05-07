@@ -776,7 +776,7 @@ class ContextMambaForRealColon(nn.Module):
             )
 
         # Classifiers
-        def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=4):
             hidden_dim = in_dim * hidden_expansion
             return nn.Sequential(
                 nn.LayerNorm(in_dim),                    # 1. Normalization
@@ -801,7 +801,7 @@ class ContextMambaForRealColon(nn.Module):
         
         # 2. Projection and Gating
         self.future_fusion_proj = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 4, d_model, **factory_kwargs),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(dropout)
@@ -809,7 +809,7 @@ class ContextMambaForRealColon(nn.Module):
         
         # Gate to control information flow and prevent "phase bleeding"
         self.fusion_gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 4, d_model, **factory_kwargs),
             nn.Sigmoid()
         )
 
