@@ -478,7 +478,7 @@ def main():
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 1
+    FOLD = 2
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 
@@ -560,7 +560,7 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
         
-    epochs = 50
+    epochs = 25
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
@@ -569,15 +569,38 @@ def main():
     best_model_path = os.path.join(save_dir, "large_batch16best_mamba_model.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
-    optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
-    
+    #optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
+    optimizer = torch.optim.Adam(full_model.parameters(), lr=2e-04, weight_decay=5e-05)
+
     if cfg_scheduler_choice == "reduceonplateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2) # should used 2, but try 3
     elif cfg_scheduler_choice == "cosine_with_warmup":
-        warmup_epochs = 2
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
+        #warmup_epochs = 2
+        #warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
+        #cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
+        #scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
+        warmup_epochs = 10
+        warmup_factor = 0.3
+
+        # Linear warmup from warmup_factor to 1.0 over warmup_epochs
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, 
+            start_factor=warmup_factor, 
+            total_iters=warmup_epochs
+        )
+
+        # Cosine annealing for the remaining epochs
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=epochs - warmup_epochs
+        )
+
+        # Chain the schedulers together
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, 
+            schedulers=[warmup_scheduler, cosine_scheduler], 
+            milestones=[warmup_epochs]
+        )
     else:
         raise ValueError(f"Unsupported scheduler choice: {cfg_scheduler_choice}")
 
