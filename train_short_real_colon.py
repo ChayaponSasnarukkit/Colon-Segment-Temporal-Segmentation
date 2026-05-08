@@ -486,7 +486,8 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='train',
-        chunk_size=600, 
+        chunk_size=300,
+        #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
         use_memory_bank=True,
@@ -504,7 +505,8 @@ def main():
         split_dir=SPLIT_DIR,
         fold=FOLD,
         phase='test',
-        chunk_size=600, 
+        chunk_size=300, 
+        #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
         use_memory_bank=True,
@@ -556,7 +558,7 @@ def main():
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
         print("correct choice")
-        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
+        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
         
     epochs = 50
     patience = int(epochs//2)  
