@@ -487,6 +487,7 @@ def main():
         fold=FOLD,
         phase='train',
         chunk_size=300,
+        num_future_seconds=4,
         #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
@@ -506,6 +507,7 @@ def main():
         fold=FOLD,
         phase='test',
         chunk_size=300, 
+        num_future_seconds=4,
         #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
@@ -558,7 +560,7 @@ def main():
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
         print("correct choice")
-        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
+        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=4, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
         
     epochs = 30
     patience = int(epochs//2)  
