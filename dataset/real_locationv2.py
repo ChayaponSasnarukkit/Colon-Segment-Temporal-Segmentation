@@ -5,6 +5,7 @@ import numpy as np
 import math
 from torch.utils.data import IterableDataset, get_worker_info
 from PIL import Image
+import os.path as osp
 
 # Updated RealColon Class Map
 LABEL_MAP = {
@@ -20,27 +21,22 @@ LABEL_MAP = {
     # "uncertain": -100,
 }
 NUM_CLASSES = len(LABEL_MAP)
-import os.path as osp
+
 class RealColonStreamingDataset(IterableDataset):
     def __init__(self, 
                  video_root, 
                  batch_size_per_worker, 
-                 
-                 # --- NEW: Split Configuration ---
                  split_dir=None,
                  fold=1,
                  phase='train',
-                 
                  chunk_size=1024, 
                  fps=5,             
                  target_fps=5,      
-                 
                  use_memory_bank=False,
                  context_seconds=600, 
                  context_fps=5,     
                  shuffle=False,
                  num_future_seconds=3,
-
                  use_emb=True,
                  emb_dim=768,
                  transform=None):
@@ -53,11 +49,12 @@ class RealColonStreamingDataset(IterableDataset):
         self.use_emb = use_emb
         self.emb_dim = emb_dim
         
-        # --- NEW: Split Logic ---
+        # --- Split Logic ---
         self.split_dir = split_dir
         self.fold = fold
         self.phase = phase
-        # --- Read Text Files for Splits (Integrated Logic) ---
+        
+        # --- Read Text Files for Splits ---
         self.sessions = []
         if self.phase == 'train':
             # Combine train and valid for training, ignoring validation phase entirely
@@ -71,7 +68,6 @@ class RealColonStreamingDataset(IterableDataset):
                 file_path = osp.join(self.split_dir, file_name)
                 if osp.exists(file_path):
                     with open(file_path, 'r') as f:
-                        # Read lines, strip newline characters, and ignore empty lines
                         lines = [line.strip() for line in f.readlines() if line.strip()]
                         self.sessions.extend(lines)
                 else:
@@ -111,7 +107,6 @@ class RealColonStreamingDataset(IterableDataset):
             vid_id = pt_file.replace('.pt', '')
 
             # --- Filter by Split ---
-            # If self.sessions is populated, skip videos not in the target split
             if self.sessions and vid_id not in self.sessions:
                 continue
 
@@ -129,7 +124,6 @@ class RealColonStreamingDataset(IterableDataset):
         return pd.DataFrame(data)
 
     def _load_images(self, video_id, frame_indices):
-        """ Reads a list of frame indices from disk (Images). """
         batch_images = []
         video_dir = os.path.join(self.video_root, str(video_id))
         
@@ -156,7 +150,6 @@ class RealColonStreamingDataset(IterableDataset):
         return torch.stack(batch_images)
 
     def _get_embeddings(self, full_emb_tensor, indices):
-        """ Extracts embeddings from the pre-loaded video tensor. """
         out = torch.zeros(len(indices), self.emb_dim)
         video_len = full_emb_tensor.shape[0]
         
@@ -228,13 +221,21 @@ class RealColonStreamingDataset(IterableDataset):
             vid_id = row['VideoID']
             total_frames = row['TotalFrames']
             
+            span_needed = self.chunk_size * self.step
+            
+            # --- NEW: Temporal Jitter Logic ---
+            start_cursor = 0
+            # Only apply jitter during training, and only if the video is longer than one chunk
+            if self.phase == 'train' and total_frames > span_needed:
+                # Randomly shift the start up to one full chunk length (span_needed)
+                start_cursor = int(torch.randint(0, span_needed, (1,)).item())
+            
             # 1. Load Embeddings
             video_emb = None
             if self.use_emb:
                 emb_path = os.path.join(self.video_root, f"{vid_id}.pt")
                 try:
                     video_emb = torch.load(emb_path, map_location='cpu')
-                    # Ensure frames match the embedding shape just in case
                     total_frames = min(total_frames, video_emb.shape[0])
                 except FileNotFoundError:
                     video_emb = torch.zeros(total_frames, self.emb_dim)
@@ -245,16 +246,15 @@ class RealColonStreamingDataset(IterableDataset):
             
             dense_labels = []
             for lbl in raw_labels:
-                # Handle potential byte strings (e.g. b'ceacum')
                 lbl_str = lbl.decode('utf-8') if isinstance(lbl, bytes) else str(lbl)
                 lbl_str = lbl_str.strip()
-                # Map to int, default to 9 ("uncertain") or -100 (ignore index) if not found
                 dense_labels.append(LABEL_MAP.get(lbl_str, -100))
                 
             dense_labels = torch.tensor(dense_labels[:total_frames], dtype=torch.long)
             
             return {
-                'cursor': 0,
+                'cursor': start_cursor,         # <-- UPDATED: Start at random offset
+                'is_first_chunk': True,         # <-- NEW: Explicitly track first chunk
                 'total': total_frames,
                 'vid_id': vid_id,
                 'labels': dense_labels,
@@ -375,7 +375,10 @@ class RealColonStreamingDataset(IterableDataset):
                 batch_future_lbl.append(future_lbl_tensor)
                 
                 # --- E. Advance Stream ---
-                reset_mask.append(curr_start == 0)
+                # UPDATED: Use the explicit flag instead of curr_start == 0
+                reset_mask.append(stream.get('is_first_chunk', False)) 
+                stream['is_first_chunk'] = False # Toggle off after the first chunk
+                
                 stream['cursor'] += span_needed
                 
                 if stream['cursor'] >= stream['total']:

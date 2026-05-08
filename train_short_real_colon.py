@@ -560,7 +560,7 @@ def main():
         print("correct choice")
         full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
         
-    epochs = 25
+    epochs = 30
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
@@ -627,8 +627,8 @@ def main():
         # Apply virtual_batch_size to accumulation_steps
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
-            accumulation_steps=2*cfg_virtual_batch_size, 
-            lambda_smooth=0.15, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
+            accumulation_steps=cfg_virtual_batch_size, 
+            lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=class_weights_tensor)
