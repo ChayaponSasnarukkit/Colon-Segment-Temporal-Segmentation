@@ -487,7 +487,7 @@ def main():
         fold=FOLD,
         phase='train',
         chunk_size=300,
-        num_future_seconds=4,
+        num_future_seconds=3,
         #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
@@ -507,7 +507,7 @@ def main():
         fold=FOLD,
         phase='test',
         chunk_size=300, 
-        num_future_seconds=4,
+        num_future_seconds=3,
         #frames_per_query=[10, 6],
         fps=5,            
         target_fps=5,     
@@ -560,9 +560,9 @@ def main():
         full_model = ContextMambaCmeRT(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3).to(device)
     else:
         print("correct choice")
-        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=4, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
+        full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
         
-    epochs = 30
+    epochs = 50
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
@@ -571,8 +571,8 @@ def main():
     best_model_path = os.path.join(save_dir, "large_batch16best_mamba_model.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
-    #optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
-    optimizer = torch.optim.Adam(full_model.parameters(), lr=2e-04, weight_decay=5e-05)
+    optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
+    #optimizer = torch.optim.Adam(full_model.parameters(), lr=2e-04, weight_decay=5e-05)
 
     if cfg_scheduler_choice == "reduceonplateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2) # should used 2, but try 3
@@ -629,8 +629,8 @@ def main():
         # Apply virtual_batch_size to accumulation_steps
         train_loss = train_one_epoch(
             full_model, train_loader, optimizer, device, 
-            accumulation_steps=cfg_virtual_batch_size, 
-            lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
+            accumulation_steps=2*cfg_virtual_batch_size, 
+            lambda_smooth=0.15, lambda_jump=0.0, with_future=True, weighted=class_weights_tensor
         )
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class = validate(full_model, val_loader, device, transition_penalty_loss, with_future=True, weighted=class_weights_tensor)
