@@ -955,7 +955,100 @@ class CausalQueryAwareMambaBlockv2(nn.Module):
         out = F_q.unsqueeze(1) + F_q_update 
         
         return out
-    
+
+class DeepCausalQueryAwareMambaBlockv2(nn.Module):
+    def __init__(self, d_model, num_queries=3, d_state=128, d_conv=4, expand=2, num_layers=2):
+        super().__init__()
+        self.d_model = d_model
+        self.num_queries = num_queries
+        self.num_layers = num_layers
+        
+        # --- Learnable Queries ---
+        self.learnable_query = nn.Parameter(torch.randn(num_queries, d_model))
+        
+        # --- Deep Processing Pathways ---
+        self.s_layers = nn.ModuleList()
+        self.q_layers = nn.ModuleList()
+        
+        # Build stacks of Mamba + MLP blocks for deep feature extraction
+        for _ in range(num_layers):
+            # Scene (s) pathway
+            self.s_layers.append(nn.ModuleDict({
+                'norm1': nn.LayerNorm(d_model),
+                'mamba': TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand),
+                'norm2': nn.LayerNorm(d_model),
+                'mlp': nn.Sequential(
+                    nn.Linear(d_model, d_model * expand),
+                    nn.GELU(),
+                    nn.Linear(d_model * expand, d_model)
+                )
+            }))
+            
+            # Query (q) pathway
+            self.q_layers.append(nn.ModuleDict({
+                'norm1': nn.LayerNorm(d_model),
+                'mamba': TimeScaleAwareMamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand),
+                'norm2': nn.LayerNorm(d_model),
+                'mlp': nn.Sequential(
+                    nn.Linear(d_model, d_model * expand),
+                    nn.GELU(),
+                    nn.Linear(d_model * expand, d_model)
+                )
+            }))
+        
+        # --- Key and Value Projections ---
+        self.linear_K = nn.Linear(d_model, d_model)
+        self.linear_V = nn.Linear(d_model, d_model)
+        self.linear_Q = nn.Linear(d_model, d_model)
+
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None, inference_params=None):
+        B, L, D = F_s.shape
+        
+        # 0. Broadcast learnable query: (B, M, D)
+        F_q = self.learnable_query.unsqueeze(0).expand(B, -1, -1)
+        
+        # 1. Deep Independent Causal Scanning (Pre-Norm + Residuals)
+        y_s = F_s
+        for layer in self.s_layers:
+            # Mamba Sub-layer
+            res_s = y_s
+            y_s = layer['mamba'](layer['norm1'](y_s), delta_t=delta_t_s, inference_params=inference_params)
+            y_s = y_s + res_s
+            
+            # MLP Sub-layer
+            res_s2 = y_s
+            y_s = layer['mlp'](layer['norm2'](y_s))
+            y_s = y_s + res_s2
+
+        y_q = F_q
+        for layer in self.q_layers:
+            # Mamba Sub-layer
+            res_q = y_q
+            y_q = layer['mamba'](layer['norm1'](y_q), delta_t=delta_t_q)
+            y_q = y_q + res_q
+            
+            # MLP Sub-layer
+            res_q2 = y_q
+            y_q = layer['mlp'](layer['norm2'](y_q))
+            y_q = y_q + res_q2
+            
+        # 2. Key and Value Projection for Scene Features
+        Q = self.linear_Q(y_q)
+        K = self.linear_K(y_s) # (B, L, D)
+        V = self.linear_V(y_s) # (B, L, D)
+        
+        # 3. O(L) PARALLEL CROSS-INTERACTION 
+        scores = torch.einsum('bmd,bld->blm', Q, K) / math.sqrt(self.d_model)
+        gates = torch.sigmoid(scores) # (B, L, M)
+        
+        # Apply the gate to the projected Values
+        F_q_update = gates.unsqueeze(-1) * V.unsqueeze(2) # (B, L, M, D)
+        
+        # 4. Residual Connection
+        out = F_q.unsqueeze(1) + F_q_update 
+        
+        return out
+
 class MultiheadCausalQueryAwareMambaBlockv2(nn.Module):
     def __init__(self, d_model, num_queries=3, num_heads=8, d_state=128, d_conv=4, expand=2):
         super().__init__()

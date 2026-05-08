@@ -1,6 +1,6 @@
 from model.CMamba import MixerModel, MambaTemporalSegmentation
 from model.Compressor import MultiLevelCompressor, MultiLevelCompressorv2
-from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, CausalQueryAwareMambaBlockv2, MultiheadCausalQueryAwareMambaBlockv2
+from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, CausalQueryAwareMambaBlockv2, MultiheadCausalQueryAwareMambaBlockv2, DeepCausalQueryAwareMambaBlockv2
 import torch
 import torch.nn as nn
 
@@ -879,6 +879,476 @@ class ContextMambaForRealColon(nn.Module):
                 delta_t_s=None,
                 delta_t_q=None
             )
+            
+            # 4. Anticipation Head Setup
+            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
+            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                              # [B, K+M, 1]
+            
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            
+            # Output shape: [B, K+M, num_future, D]
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
+                
+            # We only want the anticipation corresponding to the M current query steps.
+            # We discard the predictions made over the K context prefix.
+            future_token = future_token[:, K:, :, :] # [B, M, num_future, D]
+
+            # 5. Future-Aware Fusion
+            future_token_q = future_token # [B, M, num_future, D]
+
+        # Baseline predictions
+        logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
+        future_logits = self.future_classifier(future_token)
+        
+        B, M, num_future, D = future_token_q.shape
+
+        # 2. Reshape for MultiheadAttention
+        # We collapse Batch and Sequence length so each step M acts as an independent query
+        # Query (Current Frame): [B*M, 1, D]
+        q = enhanced_embeddings.view(B * M, 1, D)
+        
+        # Keys/Values (Future Anticipation): [B*M, num_future, D]
+        # NOTE: Using .detach() here stops the gradient tug-of-war.
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        # 3. Apply Cross Attention
+        # attn_output shape: [B*M, 1, D]
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        
+        # 4. Reshape back to sequence dimensions
+        attended_future = attn_output.view(B, M, D) # [B, M, D]
+
+        # --- Gated Residual Connection ---
+        
+        # Concatenate current and attended future
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1) # [B, M, 2D]
+        
+        # Project back to d_model
+        fusion_projection = self.future_fusion_proj(fused_features)                # [B, M, D]
+        
+        # Calculate dynamic gate (0 to 1) based on the concatenated features
+        gate = self.fusion_gate(fused_features)                                    # [B, M, D]
+        
+        # Apply gated residual connection and normalize
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        
+        # Final prediction using the safely fused features
+        logits_w_future = self.classifier_w_future(future_aware_embeddings)
+        
+        return logits_wo_future, future_logits, logits_w_future, next_states
+
+class ContextMambaLargeForRealColon(nn.Module):
+    def __init__(
+        self,
+        base_model, # Assuming MixerModel type
+        d_model: int,
+        num_classes: int,
+        num_future: int,
+        vision_dim = None,          # v2 Addition
+        use_multihead = False,      # v2 Addition
+        compression_ratio: float = 120.0, #1fps*60second*2minutes
+        frames_per_query = [12, 10],
+        target_fps: float = 5.0,
+        context_fps: float = 1.0,
+        query_fps: float = 5.0,
+        dropout: float = 0.1,
+        future_fps: float = None,
+        **factory_kwargs
+    ):
+        super().__init__()
+        # Store architecture variables
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.num_future = num_future
+        self.compression_ratio = compression_ratio
+        self.target_fps = target_fps
+        self.context_fps = context_fps
+        self.query_fps = query_fps
+        
+        # v2 Addition: Handle vision_dim fallback
+        if vision_dim is None:
+            vision_dim = d_model
+
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
+            
+        # Sub-modules
+        self.base_model = base_model
+        
+        # v2 Upgrade: MultiLevelCompressorv2
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=4)
+        num_fusion_layers = factory_kwargs.get('num_fusion_layers', 2) # Try 2 or 3
+        self.fusion_layers = nn.ModuleList([
+            QueryAwareMambaBlock(d_model=d_model) for _ in range(num_fusion_layers)
+        ])
+
+        # v2 Upgrade: Anticipation head conditional logic (v2 blocks)
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+
+        # Classifiers
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=4):
+            hidden_dim = in_dim * hidden_expansion
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),                    # 1. Normalization
+                nn.Linear(in_dim, hidden_dim),           # 3. Enrichment MLP (Layer 1)
+                nn.GELU(),                               # Activation
+                nn.Dropout(dropout),                     # 2. Dropout
+                nn.Linear(hidden_dim, out_classes)       # 3. Enrichment MLP (Head)
+            )
+
+        # Classifiers (Upgraded to MLP heads)
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
+        self.future_classifier = build_mlp_head(d_model, num_classes)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        
+        # Projection layer for fusing current state and anticipated future
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, 
+            nhead=8, 
+            dim_feedforward=d_model * 4, # Standard 4x expansion
+            dropout=dropout,
+            batch_first=True
+        )
+        # Stack 1 or 2 of these
+        self.future_cross_attn = nn.TransformerDecoder(decoder_layer, num_layers=2)
+        
+        # 2. Projection and Gating
+        self.future_fusion_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Gate to control information flow and prevent "phase bleeding"
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
+    
+    def compute_normalized_dts(self, B, M, K, device, dtype):
+        """
+        Calculates the normalized time scales based on the maximum temporal span.
+        M = query sequence length
+        K = scene/context sequence length
+        """
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
+        
+        s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+        dt_s_value = s_equiv_frames / max_equiv_frames
+        
+        q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+        dt_q_value = q_equiv_frames / max_equiv_frames
+        
+        dt_s = torch.full((B, K, 1), dt_s_value, device=device, dtype=dtype)
+        dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+        
+        return dt_s, dt_q
+
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
+        device = vision_embeddings.device
+        dtype = vision_embeddings.dtype
+
+        # 1. Compress the historical context [B, T_long, D] -> [B, K, D]
+        compressed_ctx = self.compressor(contexts)
+
+        # 2. Extract baseline query features -> [B, M, D]
+        x, next_states = self.base_model(
+            vision_embeddings=vision_embeddings, 
+            pass_states=pass_states, 
+            #labels=labels
+        )
+
+        B, M, D = x.shape
+        if compressed_ctx is None:
+            # K=0, compress_context =[], dt_s=[]
+            # calculate dt_q
+            max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+            
+            q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+            dt_q_value = q_equiv_frames / max_equiv_frames
+            dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+            
+            enhanced_embeddings = x # no fusion needed since compress_context is empty
+            full_history = enhanced_embeddings # [B, K+M, D] since K=0, full_history = enhanced_embeddings
+            full_dt_s = dt_q # [B, K+M, 1] since K=0, full_dt_s = dt_q
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q) # no need to slice K since K=0
+            future_token_q = future_token # [B, M, num_future, D]
+
+        else:
+            K = compressed_ctx.shape[1]
+
+            dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
+        
+            # 3. Mamba Cross-Fusion
+            enhanced_embeddings = x
+            for layer in self.fusion_layers:
+                enhanced_embeddings = layer(
+                    F_s=compressed_ctx,
+                    F_q=enhanced_embeddings, # update query iteratively
+                    delta_t_s=None,
+                    delta_t_q=None
+                )
+            
+            # 4. Anticipation Head Setup
+            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
+            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                              # [B, K+M, 1]
+            
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            
+            # Output shape: [B, K+M, num_future, D]
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
+                
+            # We only want the anticipation corresponding to the M current query steps.
+            # We discard the predictions made over the K context prefix.
+            future_token = future_token[:, K:, :, :] # [B, M, num_future, D]
+
+            # 5. Future-Aware Fusion
+            future_token_q = future_token # [B, M, num_future, D]
+
+        # Baseline predictions
+        logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
+        future_logits = self.future_classifier(future_token)
+        
+        B, M, num_future, D = future_token_q.shape
+
+        # 2. Reshape for MultiheadAttention
+        # We collapse Batch and Sequence length so each step M acts as an independent query
+        # Query (Current Frame): [B*M, 1, D]
+        q = enhanced_embeddings.view(B * M, 1, D)
+        
+        # Keys/Values (Future Anticipation): [B*M, num_future, D]
+        # NOTE: Using .detach() here stops the gradient tug-of-war.
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        # 3. Apply Cross Attention
+        # attn_output shape: [B*M, 1, D]
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        
+        # 4. Reshape back to sequence dimensions
+        attended_future = attn_output.view(B, M, D) # [B, M, D]
+
+        # --- Gated Residual Connection ---
+        
+        # Concatenate current and attended future
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1) # [B, M, 2D]
+        
+        # Project back to d_model
+        fusion_projection = self.future_fusion_proj(fused_features)                # [B, M, D]
+        
+        # Calculate dynamic gate (0 to 1) based on the concatenated features
+        gate = self.fusion_gate(fused_features)                                    # [B, M, D]
+        
+        # Apply gated residual connection and normalize
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        
+        # Final prediction using the safely fused features
+        logits_w_future = self.classifier_w_future(future_aware_embeddings)
+        
+        return logits_wo_future, future_logits, logits_w_future, next_states
+
+class ContextMambaExtraLargeForRealColon(nn.Module):
+    def __init__(
+        self,
+        base_model, # Assuming MixerModel type
+        d_model: int,
+        num_classes: int,
+        num_future: int,
+        vision_dim = None,          # v2 Addition
+        use_multihead = False,      # v2 Addition
+        compression_ratio: float = 120.0, #1fps*60second*2minutes
+        frames_per_query = [12, 10],
+        target_fps: float = 5.0,
+        context_fps: float = 1.0,
+        query_fps: float = 5.0,
+        dropout: float = 0.1,
+        future_fps: float = None,
+        **factory_kwargs
+    ):
+        super().__init__()
+        # Store architecture variables
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.num_future = num_future
+        self.compression_ratio = compression_ratio
+        self.target_fps = target_fps
+        self.context_fps = context_fps
+        self.query_fps = query_fps
+        
+        # v2 Addition: Handle vision_dim fallback
+        if vision_dim is None:
+            vision_dim = d_model
+
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
+            
+        # Sub-modules
+        self.base_model = base_model
+        
+        # v2 Upgrade: MultiLevelCompressorv2
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=4)
+        num_fusion_layers = factory_kwargs.get('num_fusion_layers', 2) # Try 2 or 3
+        self.fusion_layers = nn.ModuleList([
+            QueryAwareMambaBlock(d_model=d_model) for _ in range(num_fusion_layers)
+        ])
+
+        # v2 Upgrade: Anticipation head conditional logic (v2 blocks)
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = DeepCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+
+        # Classifiers
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=4):
+            hidden_dim = in_dim * hidden_expansion
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),                    # 1. Normalization
+                nn.Linear(in_dim, hidden_dim),           # 3. Enrichment MLP (Layer 1)
+                nn.GELU(),                               # Activation
+                nn.Dropout(dropout),                     # 2. Dropout
+                nn.Linear(hidden_dim, out_classes)       # 3. Enrichment MLP (Head)
+            )
+
+        # Classifiers (Upgraded to MLP heads)
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
+        self.future_classifier = build_mlp_head(d_model, num_classes)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        
+        # Projection layer for fusing current state and anticipated future
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, 
+            nhead=8, 
+            dim_feedforward=d_model * 4, # Standard 4x expansion
+            dropout=dropout,
+            batch_first=True
+        )
+        # Stack 1 or 2 of these
+        self.future_cross_attn = nn.TransformerDecoder(decoder_layer, num_layers=2)
+        
+        # 2. Projection and Gating
+        self.future_fusion_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Gate to control information flow and prevent "phase bleeding"
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
+    
+    def compute_normalized_dts(self, B, M, K, device, dtype):
+        """
+        Calculates the normalized time scales based on the maximum temporal span.
+        M = query sequence length
+        K = scene/context sequence length
+        """
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
+        
+        s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+        dt_s_value = s_equiv_frames / max_equiv_frames
+        
+        q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+        dt_q_value = q_equiv_frames / max_equiv_frames
+        
+        dt_s = torch.full((B, K, 1), dt_s_value, device=device, dtype=dtype)
+        dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+        
+        return dt_s, dt_q
+
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
+        device = vision_embeddings.device
+        dtype = vision_embeddings.dtype
+
+        # 1. Compress the historical context [B, T_long, D] -> [B, K, D]
+        compressed_ctx = self.compressor(contexts)
+
+        # 2. Extract baseline query features -> [B, M, D]
+        x, next_states = self.base_model(
+            vision_embeddings=vision_embeddings, 
+            pass_states=pass_states, 
+            #labels=labels
+        )
+
+        B, M, D = x.shape
+        if compressed_ctx is None:
+            # K=0, compress_context =[], dt_s=[]
+            # calculate dt_q
+            max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+            
+            q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+            dt_q_value = q_equiv_frames / max_equiv_frames
+            dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+            
+            enhanced_embeddings = x # no fusion needed since compress_context is empty
+            full_history = enhanced_embeddings # [B, K+M, D] since K=0, full_history = enhanced_embeddings
+            full_dt_s = dt_q # [B, K+M, 1] since K=0, full_dt_s = dt_q
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q) # no need to slice K since K=0
+            future_token_q = future_token # [B, M, num_future, D]
+
+        else:
+            K = compressed_ctx.shape[1]
+
+            dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
+        
+            # 3. Mamba Cross-Fusion
+            enhanced_embeddings = x
+            for layer in self.fusion_layers:
+                enhanced_embeddings = layer(
+                    F_s=compressed_ctx,
+                    F_q=enhanced_embeddings, # update query iteratively
+                    delta_t_s=None,
+                    delta_t_q=None
+                )
             
             # 4. Anticipation Head Setup
             full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
