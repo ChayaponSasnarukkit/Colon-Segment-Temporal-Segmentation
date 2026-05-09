@@ -38,7 +38,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 128, #xxl           
+        "d_state": 32,           
         "d_conv": 4,             
         "expand": 4,             
         "dt_rank": "auto",       
@@ -480,7 +480,7 @@ def main():
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 1
+    FOLD = 5
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 

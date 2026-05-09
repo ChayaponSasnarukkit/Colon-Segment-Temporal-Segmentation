@@ -38,7 +38,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 128, #xxl           
+        "d_state": 64,           
         "d_conv": 4,             
         "expand": 4,             
         "dt_rank": "auto",       
@@ -340,9 +340,9 @@ def compute_weights_from_dataset(train_dataset, label_map, method='smoothed'):
     if method == 'smoothed':
         raw_weights = np.sqrt(total_samples / safe_counts)
         final_weights = raw_weights * (num_classes / np.sum(raw_weights))
-        final_weights[CLASS_MAP["ascending"]] = 1.75 * final_weights[CLASS_MAP["ascending"]]
-        final_weights[CLASS_MAP["descending"]] = 2*final_weights[CLASS_MAP["descending"]]
-        final_weights[CLASS_MAP["insertion"]] = 1.25*final_weights[CLASS_MAP["insertion"]] 
+        #final_weights[CLASS_MAP["ascending"]] = 1.75 * final_weights[CLASS_MAP["ascending"]]
+        #final_weights[CLASS_MAP["descending"]] = 2*final_weights[CLASS_MAP["descending"]]
+        #final_weights[CLASS_MAP["insertion"]] = 1.25*final_weights[CLASS_MAP["insertion"]] 
     elif method == 'mfb':
         median_freq = np.median(frequencies)
         final_weights = median_freq / frequencies
@@ -480,7 +480,7 @@ def main():
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 1
+    FOLD = 3
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 

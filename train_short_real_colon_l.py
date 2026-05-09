@@ -340,7 +340,9 @@ def compute_weights_from_dataset(train_dataset, label_map, method='smoothed'):
     if method == 'smoothed':
         raw_weights = np.sqrt(total_samples / safe_counts)
         final_weights = raw_weights * (num_classes / np.sum(raw_weights))
-        
+        final_weights[CLASS_MAP["ascending"]] = 1.75 * final_weights[CLASS_MAP["ascending"]]
+        final_weights[CLASS_MAP["descending"]] = 2*final_weights[CLASS_MAP["descending"]]
+        final_weights[CLASS_MAP["insertion"]] = 1.25*final_weights[CLASS_MAP["insertion"]]
     elif method == 'mfb':
         median_freq = np.median(frequencies)
         final_weights = median_freq / frequencies

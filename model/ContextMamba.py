@@ -755,7 +755,7 @@ class ContextMambaForRealColon(nn.Module):
         self.base_model = base_model
         
         # v2 Upgrade: MultiLevelCompressorv2
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query)
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=4)
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # v2 Upgrade: Anticipation head conditional logic (v2 blocks)
@@ -1152,7 +1152,7 @@ class ContextMambaLargeForRealColon(nn.Module):
         
         # 3. Apply Cross Attention
         # attn_output shape: [B*M, 1, D]
-        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        attn_output = self.future_cross_attn(tgt=q, memory=kv)
         
         # 4. Reshape back to sequence dimensions
         attended_future = attn_output.view(B, M, D) # [B, M, D]
@@ -1387,7 +1387,7 @@ class ContextMambaExtraLargeForRealColon(nn.Module):
         
         # 3. Apply Cross Attention
         # attn_output shape: [B*M, 1, D]
-        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        attn_output = self.future_cross_attn(tgt=q, memory=kv) 
         
         # 4. Reshape back to sequence dimensions
         attended_future = attn_output.view(B, M, D) # [B, M, D]
