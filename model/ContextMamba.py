@@ -773,7 +773,7 @@ class ContextMambaForRealColon(nn.Module):
                 num_queries=num_future, 
                 d_state=128, 
                 d_conv=4, 
-                expand=2
+                expand=4
             )
 
         # Classifiers

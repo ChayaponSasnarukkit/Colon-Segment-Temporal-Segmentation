@@ -12,8 +12,8 @@ from PIL import Image
 # --- Configuration ---
 # Point this to the parent directory containing the folders of images
 # e.g., if images are in .../cas_colon/1/*.jpg, point to .../cas_colon/
-IMAGE_ROOT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/" 
-OUTPUT_DIR = "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3"
+IMAGE_ROOT_DIR = "/project/lt200353-pcllm/3d_report_gen/cas_colon/cached_images/" 
+OUTPUT_DIR = "/project/lt200353-pcllm/3d_report_gen/cas_colon/features_dinov3"
 
 BATCH_SIZE = 256
 NUM_WORKERS = 8  # This is the key to speedup

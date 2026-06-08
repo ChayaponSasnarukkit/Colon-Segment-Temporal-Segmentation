@@ -480,7 +480,7 @@ def main():
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 1
+    FOLD = 2
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 

@@ -38,7 +38,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 64, #xlxl           
+        "d_state": 128, #xlxl           
         "d_conv": 4,             
         "expand": 4,             
         "dt_rank": "auto",       

@@ -38,7 +38,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 64, #xlxl           
+        "d_state": 64,           
         "d_conv": 4,             
         "expand": 4,             
         "dt_rank": "auto",       
@@ -480,7 +480,7 @@ def main():
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/scratch/lt200353-pcllm/location/real_colon/dataset/features_dinov3"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 5
+    FOLD = 2
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 
@@ -568,9 +568,9 @@ def main():
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/mid_smoothing_dampw_realcolon_fold{FOLD}"
+    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "large_batch16best_mamba_model.pth")
+    best_model_path = os.path.join(save_dir, "123best_mamba_model.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
