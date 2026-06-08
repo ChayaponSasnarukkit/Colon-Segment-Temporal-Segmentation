@@ -1176,7 +1176,7 @@ class ContextMambaLargeForRealColon(nn.Module):
         
         return logits_wo_future, future_logits, logits_w_future, next_states
 
-class ContextMambaExtraLargeForRealColon(nn.Module):
+class   ContextMambaExtraLargeForRealColon(nn.Module):
     def __init__(
         self,
         base_model, # Assuming MixerModel type
