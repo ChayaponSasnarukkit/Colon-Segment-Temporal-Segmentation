@@ -427,7 +427,7 @@ def main():
     cfg_seed = hparams.get("seed", 42)
     cfg_fold = hparams.get("fold", 3)
     cfg_epochs = hparams.get("epochs", 50)
-    cfg_chunk_size = hparams.get("chunk_size", 1800)
+    cfg_chunk_size = hparams.get("chunk_size", 300)
     cfg_base_lr = hparams.get("lr", 5e-5)
     cfg_weight_decay = hparams.get("weight_decay", 1e-3)
     cfg_patience = hparams.get("patience", 25)
@@ -437,23 +437,23 @@ def main():
     cfg_train_csv = hparams.get("train_csv", f"./cv_folds_generated/fold{cfg_fold}_train.csv")
     cfg_val_csv = hparams.get("val_csv", f"./cv_folds_generated/fold{cfg_fold}_test.csv")
     cfg_feat_dir = hparams.get("feat_dir", "/project/lt200353-pcllm/3d_report_gen/cas_colon/features_dinov3/")
-    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/cas_colon/dstate32i_tune_full_shuffle/fold{cfg_fold}/")
+    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/cas_colon/extralow_fpsv2/fold{cfg_fold}/")
     
     # IMPORTANT: Temporal scale configurations to match standard CAS video
     cfg_fps = hparams.get("fps", 60)
-    cfg_target_fps = hparams.get("target_fps", 30)
+    cfg_target_fps = hparams.get("target_fps", 5)
     cfg_context_fps = hparams.get("context_fps", 4)
-    cfg_query_fps = hparams.get("query_fps", 30)
+    cfg_query_fps = hparams.get("query_fps", 5) # always equal to target_fps
     cfg_compression_ratio = hparams.get("compression_ratio", 240.0)
-    cfg_frames_per_query = hparams.get("frames_per_query", [24, 10])
-    cfg_vbatch = hparams.get("vbatch", 4)
+    cfg_frames_per_query = hparams.get("frames_per_query", [16, 15])
+    cfg_vbatch = hparams.get("vbatch", 32)
 
     set_seed(cfg_seed)
     g = torch.Generator()
     g.manual_seed(cfg_seed)
 
     os.makedirs(cfg_save_dir, exist_ok=True)
-    best_model_path = os.path.join(cfg_save_dir, "lr5e5_b4.pth")
+    best_model_path = os.path.join(cfg_save_dir, "test1_v2_joint_est_mamba_mdodel.pth")
     cache_save_path = os.path.join(cfg_save_dir, f"predictions_fold{cfg_fold}.npz")
 
     # Initialize CAS Dataset
@@ -478,7 +478,7 @@ def main():
     # Initialize the Large RealColon Head but with CAS temporal parameters
     full_model = ContextMambaLargeForRealColon(
         base_model=model.backbone, d_model=1024, num_classes=num_action_classes, 
-        num_future=3, use_multihead=False,
+        num_future=3, use_multihead=True,
         target_fps=cfg_target_fps, context_fps=cfg_context_fps, query_fps=cfg_query_fps, 
         compression_ratio=cfg_compression_ratio, frames_per_query=cfg_frames_per_query
     ).to(device)
