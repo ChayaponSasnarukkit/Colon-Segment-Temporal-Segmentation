@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 # --- Import Models & CAS Dataset ---
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMambaLargeForRealColon
+from model.ContextMamba import ContextMambaLargeForCasColon
 from dataset.cas_locationv3 import MedicalStreamingDataset
 
 # Assuming these are available in your working directory
@@ -476,7 +476,7 @@ def main():
     model = MambaTemporalSegmentation(config=config, vision_dim=1024, num_classes=num_action_classes, device=device, loss_fn=loss_fn)
     
     # Initialize the Large RealColon Head but with CAS temporal parameters
-    full_model = ContextMambaLargeForRealColon(
+    full_model = ContextMambaLargeForCasColon(
         base_model=model.backbone, d_model=1024, num_classes=num_action_classes, 
         num_future=3, use_multihead=False,
         target_fps=cfg_target_fps, context_fps=cfg_context_fps, query_fps=cfg_query_fps, 
@@ -518,7 +518,7 @@ def main():
         
         train_dataset.set_epoch(epoch)
         train_loader = DataLoader(train_dataset, batch_size=None, num_workers=cfg_vbatch, worker_init_fn=seed_worker, generator=g)
-        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=cfg_lambda_smooth, accumulation_steps=cfg_vbatch)
+        train_loss = train_one_epoch(full_model, train_loader, optimizer, device, lambda_smooth=cfg_lambda_smooth, accumulation_steps=2*cfg_vbatch)
         
         val_loss, val_acc, val_f1_macro, val_f1_per_class, val_edit, val_f1_overlaps, val_b_mae = validate(
             full_model, val_loader, device, transition_penalty_loss
