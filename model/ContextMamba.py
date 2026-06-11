@@ -45,7 +45,8 @@ class ContextMambaLargeForCasColon(nn.Module):
         self.base_model = base_model
         
         # v2 Upgrade: MultiLevelCompressorv2
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=4)
+        num_layers_per_stage = factory_kwargs.get('num_layers_per_stage', 4)
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=num_layers_per_stage)
         num_fusion_layers = factory_kwargs.get('num_fusion_layers', 2) # Try 2 or 3
         self.fusion_layers = nn.ModuleList([
             QueryAwareMambaBlock(d_model=d_model) for _ in range(num_fusion_layers)
@@ -70,6 +71,7 @@ class ContextMambaLargeForCasColon(nn.Module):
             )
 
         # Classifiers
+        hidden_expansion = factory_kwargs.get('hidden_expansion', 4)
         def build_mlp_head(in_dim, out_classes, hidden_expansion=4):
             hidden_dim = in_dim * hidden_expansion
             return nn.Sequential(
@@ -94,11 +96,12 @@ class ContextMambaLargeForCasColon(nn.Module):
             batch_first=True
         )
         # Stack 1 or 2 of these
-        self.future_cross_attn = nn.TransformerDecoder(decoder_layer, num_layers=2)
+        num_cross_attn_layers = factory_kwargs.get('num_cross_attn_layers', 2)
+        self.future_cross_attn = nn.TransformerDecoder(decoder_layer, num_layers=num_cross_attn_layers)
         
         # 2. Projection and Gating
         self.future_fusion_proj = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 2, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(dropout)
@@ -106,7 +109,7 @@ class ContextMambaLargeForCasColon(nn.Module):
         
         # Gate to control information flow and prevent "phase bleeding"
         self.fusion_gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
         )
 
@@ -477,7 +480,7 @@ class ContextMambav2(nn.Module):
         num_classes: int,
         num_future: int,
         vision_dim = None,
-        compression_ratio: float = 300.0, # 30*10 = 6*5*2*5 = 3*2*5*2*5 =20, 15 # 240 for cas
+        compression_ratio: float = 240.0, # 30*10 = 6*5*2*5 = 3*2*5*2*5 =20, 15 # 240 for cas
         target_fps: float = 30.0,
         context_fps: float = 4.0,
         query_fps: float = 30.0,
@@ -514,7 +517,7 @@ class ContextMambav2(nn.Module):
         #     **factory_kwargs
         # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15]) # 24, 10 for cas
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) # 24, 10 for cas
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # Anticipation: predict the next num_future second ahead using context and current
@@ -562,7 +565,7 @@ class ContextMambav2(nn.Module):
         
         # 2. Projection and Gating
         self.future_fusion_proj = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 2, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(dropout)
@@ -570,7 +573,7 @@ class ContextMambav2(nn.Module):
         
         # Gate to control information flow and prevent "phase bleeding"
         self.fusion_gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, **factory_kwargs),
+            nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
         )
 

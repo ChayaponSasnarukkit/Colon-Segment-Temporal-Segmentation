@@ -729,5 +729,232 @@ class Trainer:
                 f_ptr.close()
             time_end = time.time()
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+from sklearn.metrics import f1_score
+
+class Trainerv2:
+    def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
+        self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
+        self.ce = nn.CrossEntropyLoss(ignore_index=-100)
+
+        print('Model Size: ', sum(p.numel() for p in self.model.parameters()))
+        self.mse = nn.MSELoss(reduction='none')
+        self.num_classes = num_classes
+
+    def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None):
+        self.model.train()
+        self.model.to(device)
+        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        print('LR:{}'.format(learning_rate))
+        
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+        for epoch in range(num_epochs):
+            epoch_loss = 0
+            correct = 0
+            total = 0
+
+            num_batches = len(batch_gen.list_of_examples) // batch_size
+            if len(batch_gen.list_of_examples) % batch_size != 0:
+                num_batches += 1
+
+            # Initialize tqdm with total batches
+            pbar = tqdm(total=num_batches, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch")
+
+            while batch_gen.has_next():
+                batch_input, batch_target, mask, vids = batch_gen.next_batch(batch_size, False)
+                batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
+                optimizer.zero_grad()
+                ps = self.model(batch_input, mask)
+
+                loss = 0
+                for p in ps:
+                    loss += self.ce(p.transpose(2, 1).contiguous().view(-1, self.num_classes), batch_target.view(-1))
+                    loss += 0.15 * torch.mean(torch.clamp(
+                        self.mse(F.log_softmax(p[:, :, 1:], dim=1), F.log_softmax(p.detach()[:, :, :-1], dim=1)), min=0,
+                        max=16) * mask[:, :, 1:])
+
+                epoch_loss += loss.item()
+                loss.backward()
+                optimizer.step()
+
+                _, predicted = torch.max(ps.data[-1], 1)
+                correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
+                total += torch.sum(mask[:, 0, :]).item()
+                pbar.update(1)
+
+                # Optional: Show current loss in the bar description
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
+            # Close the bar after the loop finishes
+            pbar.close()
+            
+            scheduler.step(epoch_loss)
+            batch_gen.reset()
+            print("[epoch %d]: epoch loss = %f,   acc = %f" % (epoch + 1, epoch_loss / len(batch_gen.list_of_examples),
+                                                               float(correct) / total))
+
+            if (epoch + 1) % 1 == 0 and batch_gen_tst is not None:
+                self.test(batch_gen_tst, epoch)
+                torch.save(self.model.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".model")
+                torch.save(optimizer.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".opt")
+
+    def test(self, batch_gen_tst, epoch, device="cuda", bg_class=[-100], fps=1.0):
+        # Make sure to import these at the top of your file:
+        # from mstcn_style_metric import edit_score, iou_f1_score
+        
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        # 1. Sklearn metrics initialization (flat frames)
+        all_preds = []
+        all_targets = []
+        
+        # 2. MS-TCN metrics initialization (temporal sequences)
+        overlap = [0.1, 0.25, 0.5]
+        tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
+        edit_total = 0.0
+        num_videos = 0
+        
+        # 3. Boundary MAE initialization
+        all_gt_to_pred_errors = []
+        all_pred_to_gt_errors = []
+
+        with torch.no_grad():
+            while batch_gen_tst.has_next():
+                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1, False)
+                batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
+                
+                p = self.model(batch_input, mask)
+                _, predicted = torch.max(p[-1].data, 1)
+                
+                valid_mask = mask[:, 0, :] == 1
+                
+                # Get the continuous sequence for this specific video as a list
+                active_preds = predicted[valid_mask].cpu().numpy().tolist()
+                active_targets = batch_target[valid_mask].cpu().numpy().tolist()
+                
+                # Append for flat Sklearn metrics
+                all_preds.extend(active_preds)
+                all_targets.extend(active_targets)
+
+                # Calculate MS-TCN temporal metrics for this video sequence
+                if len(active_preds) > 0:
+                    edit_total += edit_score(active_preds, active_targets, bg_class=bg_class)
+                    num_videos += 1
+                    for s in range(len(overlap)):
+                        tp1, fp1, fn1 = iou_f1_score(active_preds, active_targets, overlap[s], bg_class=bg_class)
+                        tp[s] += tp1
+                        fp[s] += fp1
+                        fn[s] += fn1
+
+                    # --- Calculate Boundary Distances for this video ---
+                    gt_arr = np.array(active_targets)
+                    pred_arr = np.array(active_preds)
+                    
+                    # Find indices where the class changes (boundaries)
+                    gt_b = np.where(gt_arr[1:] != gt_arr[:-1])[0] + 1
+                    pred_b = np.where(pred_arr[1:] != pred_arr[:-1])[0] + 1
+                    
+                    # If both have boundaries, compute min distance
+                    if len(gt_b) > 0 and len(pred_b) > 0:
+                        for g in gt_b:
+                            all_gt_to_pred_errors.append(np.min(np.abs(pred_b - g)))
+                        for p in pred_b:
+                            all_pred_to_gt_errors.append(np.min(np.abs(gt_b - p)))
+
+                # Calculate Accuracy
+                correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
+                total += torch.sum(mask[:, 0, :]).item()
+
+        # --- Calculate Final Metrics ---
+        
+        # Sklearn Metrics
+        acc = float(correct) / total
+        f1_macro = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+
+        # MS-TCN Metrics
+        avg_edit = edit_total / num_videos if num_videos > 0 else 0.0
+        f1s = []
+        for s in range(len(overlap)):
+            precision = tp[s] / float(tp[s] + fp[s]) if (tp[s] + fp[s]) > 0 else 0.0
+            recall = tp[s] / float(tp[s] + fn[s]) if (tp[s] + fn[s]) > 0 else 0.0
+            f1_val = 2.0 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1s.append(np.nan_to_num(f1_val) * 100)
+
+        # Boundary MAE Metrics (Divided by fps to convert frames to seconds if desired)
+        unit = "frames" if fps == 1.0 else "seconds"
+        gt_to_pred_mae = (np.mean(all_gt_to_pred_errors) / fps) if all_gt_to_pred_errors else 0.0
+        pred_to_gt_mae = (np.mean(all_pred_to_gt_errors) / fps) if all_pred_to_gt_errors else 0.0
+        sym_mae = (gt_to_pred_mae + pred_to_gt_mae) / 2 if (all_gt_to_pred_errors and all_pred_to_gt_errors) else 0.0
+
+        # --- Print Results ---
+        print("\n---[epoch %d]---" % (epoch + 1))
+        print("  Test Acc:        %.4f" % acc)
+        print("  Test Macro F1:   %.4f" % f1_macro)
+        print("  Edit Score:      %.4f" % avg_edit)
+        for i, thresh in enumerate(overlap):
+            print("  F1@%.2f:         %.4f" % (thresh, f1s[i]))
+        print("  --- Boundaries ---")
+        if all_gt_to_pred_errors and all_pred_to_gt_errors:
+            print("  GT->Pred MAE:    %.4f %s" % (gt_to_pred_mae, unit))
+            print("  Pred->GT MAE:    %.4f %s" % (pred_to_gt_mae, unit))
+            print("  Symmetric MAE:   %.4f %s" % (sym_mae, unit))
+        else:
+            print("  Boundary MAE:    N/A (No valid boundary pairs)")
+        print("------------------\n")
+
+        self.model.train()
+        batch_gen_tst.reset()
+
+    def predict(self, model_dir, results_dir, features_path, batch_gen_tst, epoch, actions_dict, sample_rate):
+        self.model.eval()
+        with torch.no_grad():
+            self.model.to(device)
+            self.model.load_state_dict(torch.load(model_dir + "/epoch-" + str(epoch) + ".model"))
+
+            batch_gen_tst.reset()
+            import time
+            
+            time_start = time.time()
+            while batch_gen_tst.has_next():
+                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1)
+                vid = vids[0]
+                features = np.load(features_path + vid.split('.')[0] + '.npy')
+                features = features[:, ::sample_rate]
+
+                input_x = torch.tensor(features, dtype=torch.float)
+                input_x.unsqueeze_(0)
+                input_x = input_x.to(device)
+                predictions = self.model(input_x, torch.ones(input_x.size(), device=device))
+
+                for i in range(len(predictions)):
+                    confidence, predicted = torch.max(F.softmax(predictions[i], dim=1).data, 1)
+                    confidence, predicted = confidence.squeeze(), predicted.squeeze()
+ 
+                    batch_target = batch_target.squeeze()
+                    confidence, predicted = confidence.squeeze(), predicted.squeeze()
+ 
+                    segment_bars_with_confidence(results_dir + '/{}_stage{}.png'.format(vid, i),
+                                                 confidence.tolist(),
+                                                 batch_target.tolist(), predicted.tolist())
+
+                recognition = []
+                for i in range(len(predicted)):
+                    recognition = np.concatenate((recognition, [list(actions_dict.keys())[
+                                                                    list(actions_dict.values()).index(
+                                                                        predicted[i].item())]] * sample_rate))
+                f_name = vid.split('/')[-1].split('.')[0]
+                f_ptr = open(results_dir + "/" + f_name, "w")
+                f_ptr.write("### Frame level recognition: ###\n")
+                f_ptr.write(' '.join(recognition))
+                f_ptr.close()
+            time_end = time.time()
+
 if __name__ == '__main__':
     pass

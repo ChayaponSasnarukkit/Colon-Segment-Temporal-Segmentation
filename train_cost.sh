@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH -p gpu-limited                  # Specify partition [Compute/Memory/GPU]
+#SBATCH -p gpu-devel                  # Specify partition [Compute/Memory/GPU]
 #SBATCH -N 1 -c 32
 #SBATCH --ntasks-per-node=1   # 4 tasks
 #SBATCH --gpus-per-node=1     # 4 GPUs total on the node
-#SBATCH -t 3:20:00                     # Specify maximum time limit (hour: minute: second)
+#SBATCH -t 2:00:00                     # Specify maximum time limit (hour: minute: second)
 #SBATCH -A lt200353               # Specify project name
 #SBATCH -J TEST                         # Specify job name
 

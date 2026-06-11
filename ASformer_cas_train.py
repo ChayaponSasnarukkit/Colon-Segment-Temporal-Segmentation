@@ -3,7 +3,7 @@ import numpy as np
 import random
 import os
 import pandas as pd
-from model.ASFormer import Trainer
+from model.ASFormer import Trainerv2
 
 # --- Helper to parse time strings like "1:23" to seconds ---
 
@@ -183,20 +183,28 @@ def main():
     # 1 fps = 1200 frames for 20 mins (Very safe)
     # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
     TARGET_FPS = 5 
-    FOLD = 3
+    FOLD = 1
     print(FOLD)
     
-    base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
-    features_path = os.path.join(base_dir, "features_dinov3/") 
-    train_split_csv = f"cv_folds_generated/fold{FOLD}_train.csv"
-    test_split_csv = f"cv_folds_generated/fold{FOLD}_test.csv"
+    #base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
+    #features_path = os.path.join(base_dir, "features_dinov3/") 
+    #train_split_csv = f"cv_folds_generated/fold{FOLD}_train.csv"
+    #test_split_csv = f"cv_folds_generated/fold{FOLD}_test.csv"
     #train_split_csv = os.path.join(base_dir, "updated_train_split.csv")
     #test_split_csv = os.path.join(base_dir, "updated_test_split.csv")
     
+    #save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}_{FOLD}")
+    #if not os.path.exists(save_dir):
+     #   os.makedirs(save_dir)
+
+    base_dir = "/project/lt200353-pcllm/3d_report_gen/cas_colon"
+    features_path = os.path.join(base_dir, "features_dinov3/")
+    train_split_csv = f"cv_folds_generated/fold{FOLD}_train.csv"
+    test_split_csv = f"cv_folds_generated/fold{FOLD}_test.csv"
+
     save_dir = os.path.join(base_dir, f"dinov3_models_fps{TARGET_FPS}_{FOLD}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-
     # Define Classes
     class_names = [
         "Terminal_Ileum", "Cecum", "Ascending_Colon", "Hepatic_Flexure", 
@@ -216,7 +224,7 @@ def main():
         print("Error: No feature files found.")
         return
 
-    trainer = Trainer(
+    trainer = Trainerv2(
         num_layers=10, 
         r1=2, 
         r2=2, 

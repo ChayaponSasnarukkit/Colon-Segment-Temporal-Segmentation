@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 # --- Import Models & CAS Dataset ---
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMambaLargeForRealColon
+from model.ContextMamba import ContextMambav2
 from dataset.cas_locationv3 import MedicalStreamingDataset
 
 # Assuming these are available in your working directory
@@ -44,9 +44,9 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 32,           
+        "d_state": 16,           
         "d_conv": 4,             
-        "expand": 4,             
+        "expand": 2,             
         "dt_rank": "auto",       
         "layer": "Mamba1",       
         "use_fast_path": False,
@@ -424,37 +424,38 @@ def main():
         hparams = {}
 
     # Structure/Config Extraction
-    cfg_seed = hparams.get("seed", 42)
-    cfg_fold = hparams.get("fold", 1)
+    cfg_seed = hparams.get("seed", 455)
+    cfg_fold = hparams.get("fold", 5)
     cfg_epochs = hparams.get("epochs", 50)
-    cfg_chunk_size = hparams.get("chunk_size", 300)
+    cfg_chunk_size = hparams.get("chunk_size", 1800)
     cfg_base_lr = hparams.get("lr", 5e-5)
     cfg_weight_decay = hparams.get("weight_decay", 1e-3)
     cfg_patience = hparams.get("patience", 25)
-    cfg_lambda_smooth = hparams.get("lambda_smooth", 2.5)
-    
+    cfg_lambda_smooth = hparams.get("lambda_smooth", 0.5)
+     
     # Dataset specific
     cfg_train_csv = hparams.get("train_csv", f"./cv_folds_generated/fold{cfg_fold}_train.csv")
     cfg_val_csv = hparams.get("val_csv", f"./cv_folds_generated/fold{cfg_fold}_test.csv")
     cfg_feat_dir = hparams.get("feat_dir", "/project/lt200353-pcllm/3d_report_gen/cas_colon/features_dinov3/")
-    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/cas_colon/extralow_fps_no_weight/fold{cfg_fold}/")
+    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i455_4_full_shuffle/fold{cfg_fold}/")
     
     # IMPORTANT: Temporal scale configurations to match standard CAS video
     cfg_fps = hparams.get("fps", 60)
-    cfg_target_fps = hparams.get("target_fps", 5)
+    cfg_target_fps = hparams.get("target_fps", 30)
     cfg_context_fps = hparams.get("context_fps", 4)
-    cfg_query_fps = hparams.get("query_fps", 5) # always equal to target_fps
+    cfg_query_fps = hparams.get("query_fps", 30)
     cfg_compression_ratio = hparams.get("compression_ratio", 240.0)
     cfg_frames_per_query = hparams.get("frames_per_query", [24, 10])
-    cfg_vbatch = hparams.get("vbatch", 32)
-    f1_based_weights = None
+    cfg_vbatch = hparams.get("vbatch", 4)
+
+    #f1_based_weights = None
 
     set_seed(cfg_seed)
     g = torch.Generator()
     g.manual_seed(cfg_seed)
 
     os.makedirs(cfg_save_dir, exist_ok=True)
-    best_model_path = os.path.join(cfg_save_dir, "test1_v2_joint_est_mamba_mdodel.pth")
+    best_model_path = os.path.join(cfg_save_dir, "lr5e5_b4.pth")
     cache_save_path = os.path.join(cfg_save_dir, f"predictions_fold{cfg_fold}.npz")
 
     # Initialize CAS Dataset
@@ -477,7 +478,7 @@ def main():
     model = MambaTemporalSegmentation(config=config, vision_dim=1024, num_classes=num_action_classes, device=device, loss_fn=loss_fn)
     
     # Initialize the Large RealColon Head but with CAS temporal parameters
-    full_model = ContextMambaLargeForRealColon(
+    full_model = ContextMambav2(
         base_model=model.backbone, d_model=1024, num_classes=num_action_classes, 
         num_future=3, use_multihead=True,
         target_fps=cfg_target_fps, context_fps=cfg_context_fps, query_fps=cfg_query_fps, 
