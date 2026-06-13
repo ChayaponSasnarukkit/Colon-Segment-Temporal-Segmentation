@@ -519,25 +519,92 @@ def func_eval(dataset, recog_path, file_list):
  
     return acc, edit, f1s
 
+import os
+import csv
+import torch
+import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 from tqdm import tqdm
 from sklearn.metrics import f1_score
+from scipy.optimize import linear_sum_assignment
+
+# Make sure to import these from your actual metric file:
+# from mstcn_style_metric import edit_score, iou_f1_score
+
+# ---------------------------------------------------------
+# 1. Pure NumPy Helper Functions for Bipartite b-MAE
+# ---------------------------------------------------------
+def extract_boundaries_numpy(arr, fps=30):
+    """Pure NumPy boundary extraction to avoid Pandas overhead in PyTorch loops."""
+    if len(arr) <= 1:
+        return np.array([]), np.array([])
+    
+    # Find indices where the class changes
+    changes = arr[:-1] != arr[1:]
+    
+    # The boundary index is the frame AFTER the change
+    boundary_indices = np.where(changes)[0] + 1
+    boundary_times = boundary_indices / fps
+    boundary_classes = arr[boundary_indices]
+    
+    return boundary_times, boundary_classes
+
+def class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, penalty=100):
+    """Calculates Class-Aware Bipartite Boundary MAE."""
+    if len(gt_times) == 0 and len(pred_times) == 0:
+        return 0.0
+    if len(gt_times) == 0:
+        return penalty * len(pred_times)
+    if len(pred_times) == 0:
+        return penalty * len(gt_times)
+
+    cost_matrix = np.abs(gt_times[:, None] - pred_times[None, :])
+    class_match_mask = (gt_classes[:, None] == pred_classes[None, :])
+    
+    INVALID_COST = 1e10 
+    cost_matrix[~class_match_mask] = INVALID_COST
+    
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    total_error = 0.0
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] >= INVALID_COST:
+            total_error += (penalty * 2)
+        else:
+            total_error += cost_matrix[r, c]
+            
+    unmatched_gt = len(gt_times) - len(row_ind)
+    unmatched_pred = len(pred_times) - len(col_ind)
+    total_error += (unmatched_gt + unmatched_pred) * penalty
+    
+    normalization = max(len(gt_times), len(pred_times))
+    return total_error / normalization
+
 class Trainer:
     def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
-        self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
+        # Assuming MyTransformer is imported or defined elsewhere
+        # self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
         self.ce = nn.CrossEntropyLoss(ignore_index=-100)
-
-        print('Model Size: ', sum(p.numel() for p in self.model.parameters()))
         self.mse = nn.MSELoss(reduction='none')
         self.num_classes = num_classes
 
-    def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None):
+    def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda"):
         self.model.train()
         self.model.to(device)
         optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=1e-5)
         print('LR:{}'.format(learning_rate))
         
-        
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+        
+        # --- CSV SETUP (Now with two b-MAE columns) ---
+        os.makedirs(save_dir, exist_ok=True)
+        csv_path = os.path.join(save_dir, "training_metrics_cache.csv")
+        with open(csv_path, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Epoch', 'Train_Loss', 'Test_Acc', 'Test_Macro_F1', 'Edit_Score', 'F1@0.1', 'F1@0.25', 'F1@0.5', 'Matched_bMAE_p0', 'Penalized_bMAE_p100'])
+
         for epoch in range(num_epochs):
             epoch_loss = 0
             correct = 0
@@ -547,7 +614,6 @@ class Trainer:
             if len(batch_gen.list_of_examples) % batch_size != 0:
                 num_batches += 1
 
-            # Initialize tqdm with total batches
             pbar = tqdm(total=num_batches, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch")
 
             while batch_gen.has_next():
@@ -571,60 +637,57 @@ class Trainer:
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
                 pbar.update(1)
-
-                # Optional: Show current loss in the bar description
                 pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-            # Close the bar after the loop finishes
             pbar.close()
             
-            
+            avg_epoch_loss = epoch_loss / len(batch_gen.list_of_examples)
             scheduler.step(epoch_loss)
             batch_gen.reset()
-            print("[epoch %d]: epoch loss = %f,   acc = %f" % (epoch + 1, epoch_loss / len(batch_gen.list_of_examples),
-                                                               float(correct) / total))
+            
+            print("[epoch %d]: epoch loss = %f,   acc = %f" % (epoch + 1, avg_epoch_loss, float(correct) / total))
 
+            # --- TESTING & CACHING ---
             if (epoch + 1) % 1 == 0 and batch_gen_tst is not None:
-                self.test(batch_gen_tst, epoch)
+                # 1. Get metrics dictionary from test function
+                metrics = self.test(batch_gen_tst, epoch, device=device)
+                
+                # 2. Append to CSV
+                with open(csv_path, mode='a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        epoch + 1, 
+                        f"{avg_epoch_loss:.4f}", 
+                        f"{metrics['acc']:.4f}", 
+                        f"{metrics['f1_macro']:.4f}", 
+                        f"{metrics['edit']:.4f}", 
+                        f"{metrics['f1s'][0]:.4f}", 
+                        f"{metrics['f1s'][1]:.4f}", 
+                        f"{metrics['f1s'][2]:.4f}",
+                        f"{metrics['b_mae_p0']:.4f}",       # Matched error
+                        f"{metrics['b_mae_p100']:.4f}"      # Penalized error
+                    ])
+
                 torch.save(self.model.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".model")
                 torch.save(optimizer.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".opt")
 
-    """def test(self, batch_gen_tst, epoch):
-        self.model.eval()
-        correct = 0
-        total = 0
-        if_warp = False  # When testing, always false
-        with torch.no_grad():
-            while batch_gen_tst.has_next():
-                batch_input, batch_target, mask, vids = batch_gen_tst.next_batch(1, if_warp)
-                batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
-                p = self.model(batch_input, mask)
-                _, predicted = torch.max(p.data[-1], 1)
-                correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
-                total += torch.sum(mask[:, 0, :]).item()
 
-        acc = float(correct) / total
-        print("---[epoch %d]---: tst acc = %f" % (epoch + 1, acc))
-
-        self.model.train()
-        batch_gen_tst.reset()"""
-    def test(self, batch_gen_tst, epoch, device="cuda", bg_class=[-100]):
-        # Make sure to import these at the top of your file:
-        # from mstcn_style_metric import edit_score, iou_f1_score
-        
+    def test(self, batch_gen_tst, epoch, device="cuda", bg_class=[-100], fps=30):
         self.model.eval()
         correct = 0
         total = 0
         
-        # 1. Sklearn metrics initialization (flat frames)
         all_preds = []
         all_targets = []
         
-        # 2. MS-TCN metrics initialization (temporal sequences)
         overlap = [0.1, 0.25, 0.5]
         tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
         edit_total = 0.0
         num_videos = 0
+        
+        # Two separate lists for the two metric variants
+        b_mae_errors_p0 = [] 
+        b_mae_errors_p100 = []
         
         with torch.no_grad():
             while batch_gen_tst.has_next():
@@ -636,16 +699,18 @@ class Trainer:
                 
                 valid_mask = mask[:, 0, :] == 1
                 
-                # Get the continuous sequence for this specific video as a list
-                active_preds = predicted[valid_mask].cpu().numpy().tolist()
-                active_targets = batch_target[valid_mask].cpu().numpy().tolist()
+                # Convert to pure numpy for metrics
+                active_preds_np = predicted[valid_mask].cpu().numpy()
+                active_targets_np = batch_target[valid_mask].cpu().numpy()
                 
-                # Append for flat Sklearn metrics
+                active_preds = active_preds_np.tolist()
+                active_targets = active_targets_np.tolist()
+                
                 all_preds.extend(active_preds)
                 all_targets.extend(active_targets)
 
-                # Calculate MS-TCN temporal metrics for this video sequence
                 if len(active_preds) > 0:
+                    # 1. MS-TCN Metrics
                     edit_total += edit_score(active_preds, active_targets, bg_class=bg_class)
                     num_videos += 1
                     for s in range(len(overlap)):
@@ -654,17 +719,26 @@ class Trainer:
                         fp[s] += fp1
                         fn[s] += fn1
 
+                    # 2. Bipartite b-MAE calculation (Both Variants)
+                    gt_times, gt_classes = extract_boundaries_numpy(active_targets_np, fps=fps)
+                    pred_times, pred_classes = extract_boundaries_numpy(active_preds_np, fps=fps)
+                    
+                    # Calculate penalty = 0
+                    seq_mae_p0 = class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, penalty=0)
+                    b_mae_errors_p0.append(seq_mae_p0)
+                    
+                    # Calculate penalty = 100
+                    seq_mae_p100 = class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, penalty=100)
+                    b_mae_errors_p100.append(seq_mae_p100)
+
                 # Calculate Accuracy
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
 
         # --- Calculate Final Metrics ---
-        
-        # Sklearn Metrics
         acc = float(correct) / total
         f1_macro = f1_score(all_targets, all_preds, average='macro', zero_division=0)
 
-        # MS-TCN Metrics
         avg_edit = edit_total / num_videos if num_videos > 0 else 0.0
         f1s = []
         for s in range(len(overlap)):
@@ -673,6 +747,10 @@ class Trainer:
             f1_val = 2.0 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
             f1s.append(np.nan_to_num(f1_val) * 100)
 
+        # Average both b-MAE variants
+        avg_b_mae_p0 = np.mean(b_mae_errors_p0) if len(b_mae_errors_p0) > 0 else 0.0
+        avg_b_mae_p100 = np.mean(b_mae_errors_p100) if len(b_mae_errors_p100) > 0 else 0.0
+
         # --- Print Results ---
         print("\n---[epoch %d]---" % (epoch + 1))
         print("  Test Acc:      %.4f" % acc)
@@ -680,10 +758,22 @@ class Trainer:
         print("  Edit Score:    %.4f" % avg_edit)
         for i, thresh in enumerate(overlap):
             print("  F1@%.2f:       %.4f" % (thresh, f1s[i]))
+        print("  Matched b-MAE (p=0):   %.4f seconds" % avg_b_mae_p0)
+        print("  Penalized b-MAE (p=100): %.4f seconds" % avg_b_mae_p100)
         print("------------------\n")
 
         self.model.train()
         batch_gen_tst.reset()
+        
+        # Return metrics to the training loop for CSV caching
+        return {
+            "acc": acc,
+            "f1_macro": f1_macro,
+            "edit": avg_edit,
+            "f1s": f1s,
+            "b_mae_p0": avg_b_mae_p0,
+            "b_mae_p100": avg_b_mae_p100
+        }
     def predict(self, model_dir, results_dir, features_path, batch_gen_tst, epoch, actions_dict, sample_rate):
         self.model.eval()
         with torch.no_grad():
