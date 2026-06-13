@@ -590,14 +590,7 @@ class Trainer:
         print('Model Size: ', sum(p.numel() for p in self.model.parameters()))
         self.mse = nn.MSELoss(reduction='none')
         self.num_classes = num_classes
-
-    #def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
-        # Assuming MyTransformer is imported or defined elsewhere
-        # self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
-        #s#elf.ce = nn.CrossEntropyLoss(ignore_index=-100)
-        #self.mse = nn.MSELoss(reduction='none')
-        #self.num_classes = num_classes
-
+    
     def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda"):
         self.model.train()
         self.model.to(device)
@@ -606,7 +599,7 @@ class Trainer:
         
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
         
-        # --- CSV SETUP (Now with two b-MAE columns) ---
+        # --- CSV SETUP ---
         os.makedirs(save_dir, exist_ok=True)
         csv_path = os.path.join(save_dir, "training_metrics_cache.csv")
         with open(csv_path, mode='w', newline='') as f:
@@ -657,10 +650,9 @@ class Trainer:
 
             # --- TESTING & CACHING ---
             if (epoch + 1) % 1 == 0 and batch_gen_tst is not None:
-                # 1. Get metrics dictionary from test function
-                metrics = self.test(batch_gen_tst, epoch, device=device)
+                # Passed save_dir here so test() knows where to dump the predictions
+                metrics = self.test(batch_gen_tst, epoch, save_dir, device=device)
                 
-                # 2. Append to CSV
                 with open(csv_path, mode='a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([
@@ -672,15 +664,15 @@ class Trainer:
                         f"{metrics['f1s'][0]:.4f}", 
                         f"{metrics['f1s'][1]:.4f}", 
                         f"{metrics['f1s'][2]:.4f}",
-                        f"{metrics['b_mae_p0']:.4f}",       # Matched error
-                        f"{metrics['b_mae_p100']:.4f}"      # Penalized error
+                        f"{metrics['b_mae_p0']:.4f}",
+                        f"{metrics['b_mae_p100']:.4f}"
                     ])
 
                 torch.save(self.model.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".model")
                 torch.save(optimizer.state_dict(), save_dir + "/epoch-" + str(epoch + 1) + ".opt")
 
 
-    def test(self, batch_gen_tst, epoch, device="cuda", bg_class=[-100], fps=30):
+    def test(self, batch_gen_tst, epoch, save_dir, device="cuda", bg_class=[-100], fps=5):
         self.model.eval()
         correct = 0
         total = 0
@@ -693,9 +685,11 @@ class Trainer:
         edit_total = 0.0
         num_videos = 0
         
-        # Two separate lists for the two metric variants
         b_mae_errors_p0 = [] 
         b_mae_errors_p100 = []
+
+        # Dictionary to store raw arrays for offline evaluation
+        prediction_cache = {}
         
         with torch.no_grad():
             while batch_gen_tst.has_next():
@@ -707,10 +701,19 @@ class Trainer:
                 
                 valid_mask = mask[:, 0, :] == 1
                 
-                # Convert to pure numpy for metrics
+                # Convert to pure numpy
                 active_preds_np = predicted[valid_mask].cpu().numpy()
                 active_targets_np = batch_target[valid_mask].cpu().numpy()
                 
+                # Grab the video ID (handle lists vs single strings)
+                vid_id = vids[0] if isinstance(vids, (list, tuple)) else vids
+                
+                # Store the raw numpy arrays in our cache dictionary
+                prediction_cache[vid_id] = {
+                    'predictions': active_preds_np,
+                    'targets': active_targets_np
+                }
+
                 active_preds = active_preds_np.tolist()
                 active_targets = active_targets_np.tolist()
                 
@@ -718,7 +721,6 @@ class Trainer:
                 all_targets.extend(active_targets)
 
                 if len(active_preds) > 0:
-                    # 1. MS-TCN Metrics
                     edit_total += edit_score(active_preds, active_targets, bg_class=bg_class)
                     num_videos += 1
                     for s in range(len(overlap)):
@@ -727,23 +729,22 @@ class Trainer:
                         fp[s] += fp1
                         fn[s] += fn1
 
-                    # 2. Bipartite b-MAE calculation (Both Variants)
                     gt_times, gt_classes = extract_boundaries_numpy(active_targets_np, fps=fps)
                     pred_times, pred_classes = extract_boundaries_numpy(active_preds_np, fps=fps)
                     
-                    # Calculate penalty = 0
                     seq_mae_p0 = class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, penalty=0)
                     b_mae_errors_p0.append(seq_mae_p0)
                     
-                    # Calculate penalty = 100
                     seq_mae_p100 = class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, penalty=100)
                     b_mae_errors_p100.append(seq_mae_p100)
 
-                # Calculate Accuracy
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
 
-        # --- Calculate Final Metrics ---
+        # Save the dictionary of arrays to a PyTorch file
+        cache_path = os.path.join(save_dir, f"/project/lt200353-pcllm/3d_report_gen/cas_colon/ASFORMER/test_predictions_epoch_{epoch + 1}.pt")
+        torch.save(prediction_cache, cache_path)
+
         acc = float(correct) / total
         f1_macro = f1_score(all_targets, all_preds, average='macro', zero_division=0)
 
@@ -755,11 +756,9 @@ class Trainer:
             f1_val = 2.0 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
             f1s.append(np.nan_to_num(f1_val) * 100)
 
-        # Average both b-MAE variants
         avg_b_mae_p0 = np.mean(b_mae_errors_p0) if len(b_mae_errors_p0) > 0 else 0.0
         avg_b_mae_p100 = np.mean(b_mae_errors_p100) if len(b_mae_errors_p100) > 0 else 0.0
 
-        # --- Print Results ---
         print("\n---[epoch %d]---" % (epoch + 1))
         print("  Test Acc:      %.4f" % acc)
         print("  Test Macro F1: %.4f" % f1_macro)
@@ -768,12 +767,12 @@ class Trainer:
             print("  F1@%.2f:       %.4f" % (thresh, f1s[i]))
         print("  Matched b-MAE (p=0):   %.4f seconds" % avg_b_mae_p0)
         print("  Penalized b-MAE (p=100): %.4f seconds" % avg_b_mae_p100)
+        print(f"  > Raw predictions saved to: {cache_path}")
         print("------------------\n")
 
         self.model.train()
         batch_gen_tst.reset()
         
-        # Return metrics to the training loop for CSV caching
         return {
             "acc": acc,
             "f1_macro": f1_macro,
