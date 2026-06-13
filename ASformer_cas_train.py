@@ -183,7 +183,7 @@ def main():
     # 1 fps = 1200 frames for 20 mins (Very safe)
     # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
     TARGET_FPS = 5 
-    FOLD = 2
+    FOLD = 5
     print(FOLD)
     
     #base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
