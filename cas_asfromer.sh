@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p gpu-limited
+#SBATCH -p gpu
 #SBATCH -N 1 -c 16
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1

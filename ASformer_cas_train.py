@@ -3,7 +3,7 @@ import numpy as np
 import random
 import os
 import pandas as pd
-from model.ASFormer import Trainerv2
+from model.ASFormer import Trainer
 
 # --- Helper to parse time strings like "1:23" to seconds ---
 
@@ -183,7 +183,7 @@ def main():
     # 1 fps = 1200 frames for 20 mins (Very safe)
     # 5 fps = 6000 frames for 20 mins (Safe on A100/V100)
     TARGET_FPS = 5 
-    FOLD = 5
+    FOLD = 1
     print(FOLD)
     
     #base_dir = "/scratch/lt200353-pcllm/location/cas_colon/"
@@ -224,7 +224,7 @@ def main():
         print("Error: No feature files found.")
         return
 
-    trainer = Trainerv2(
+    trainer = Trainer(
         num_layers=10, 
         r1=2, 
         r2=2, 

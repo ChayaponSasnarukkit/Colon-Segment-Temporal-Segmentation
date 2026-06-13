@@ -584,11 +584,19 @@ def class_aware_bipartite_mae(gt_times, gt_classes, pred_times, pred_classes, pe
 
 class Trainer:
     def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
-        # Assuming MyTransformer is imported or defined elsewhere
-        # self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
+        self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
         self.ce = nn.CrossEntropyLoss(ignore_index=-100)
+
+        print('Model Size: ', sum(p.numel() for p in self.model.parameters()))
         self.mse = nn.MSELoss(reduction='none')
         self.num_classes = num_classes
+
+    #def __init__(self, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate):
+        # Assuming MyTransformer is imported or defined elsewhere
+        # self.model = MyTransformer(3, num_layers, r1, r2, num_f_maps, input_dim, num_classes, channel_masking_rate)
+        #s#elf.ce = nn.CrossEntropyLoss(ignore_index=-100)
+        #self.mse = nn.MSELoss(reduction='none')
+        #self.num_classes = num_classes
 
     def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda"):
         self.model.train()
