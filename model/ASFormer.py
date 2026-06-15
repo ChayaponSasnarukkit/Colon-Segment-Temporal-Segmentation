@@ -680,7 +680,7 @@ class Trainer:
         all_preds = []
         all_targets = []
         
-        overlap = [0.1, 0.25, 0.5, 0.75, 0.90]
+        overlap = [0.1, 0.25, 0.5]
         tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
         edit_total = 0.0
         num_videos = 0
