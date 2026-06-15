@@ -742,7 +742,7 @@ class Trainer:
                 total += torch.sum(mask[:, 0, :]).item()
 
         # Save the dictionary of arrays to a PyTorch file
-        cache_path = os.path.join(save_dir, f"/project/lt200353-pcllm/3d_report_gen/cas_colon/ASFORMER/FOLD5_test_predictions_epoch_{epoch + 1}.pt")
+        cache_path = os.path.join(save_dir, f"/project/lt200353-pcllm/3d_report_gen/cas_colon/ASFORMER/FOLD1_test_predictions_epoch_{epoch + 1}.pt")
         torch.save(prediction_cache, cache_path)
 
         acc = float(correct) / total
