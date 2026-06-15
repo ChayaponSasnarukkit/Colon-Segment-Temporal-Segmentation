@@ -702,14 +702,17 @@ class Trainer:
                 valid_mask = mask[:, 0, :] == 1
                 
                 # Convert to pure numpy
-                active_preds_np = predicted.cpu().numpy()
-                active_targets_np = batch_target.cpu().numpy()
+                active_preds_np = predicted[valid_mask].cpu().numpy()
+                active_targets_np = batch_target[valid_mask].cpu().numpy()
                 
                 # Grab the video ID (handle lists vs single strings)
                 vid_id = vids[0] if isinstance(vids, (list, tuple)) else vids
                 
                 # Store the raw numpy arrays in our cache dictionary
                 prediction_cache[vid_id] = {
+                    'raw_predictions': predicted.cpu().numpy(),
+                    'raw_targets': batch_target.cpu().numpy(),
+                    'mask': mask.cpu().numpy(),
                     'predictions': active_preds_np,
                     'targets': active_targets_np
                 }

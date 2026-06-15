@@ -424,8 +424,8 @@ def main():
         hparams = {}
 
     # Structure/Config Extraction
-    cfg_seed = hparams.get("seed", 422)
-    cfg_fold = hparams.get("fold", 2)
+    cfg_seed = hparams.get("seed", 455)
+    cfg_fold = hparams.get("fold", 5)
     cfg_epochs = hparams.get("epochs", 50)
     cfg_chunk_size = hparams.get("chunk_size", 1800)
     cfg_base_lr = hparams.get("lr", 5e-5)
@@ -455,7 +455,7 @@ def main():
     g.manual_seed(cfg_seed)
 
     os.makedirs(cfg_save_dir, exist_ok=True)
-    best_model_path = "/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i42_1_full_shuffle/fold2/lr5e5_b4.pth"
+    best_model_path = "/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i455_4_full_shuffle/fold5/lr5e5_b4.pth"
     cache_save_path = os.path.join(cfg_save_dir, f"new_predictions_fold{cfg_fold}.npz")
 
     # Initialize CAS Dataset
