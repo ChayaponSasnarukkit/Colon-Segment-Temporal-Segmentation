@@ -680,7 +680,7 @@ class Trainer:
         all_preds = []
         all_targets = []
         
-        overlap = [0.1, 0.25, 0.5]
+        overlap = [0.1, 0.25, 0.5, 0.75, 0.90]
         tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
         edit_total = 0.0
         num_videos = 0
@@ -702,8 +702,8 @@ class Trainer:
                 valid_mask = mask[:, 0, :] == 1
                 
                 # Convert to pure numpy
-                active_preds_np = predicted[valid_mask].cpu().numpy()
-                active_targets_np = batch_target[valid_mask].cpu().numpy()
+                active_preds_np = predicted.cpu().numpy()
+                active_targets_np = batch_target.cpu().numpy()
                 
                 # Grab the video ID (handle lists vs single strings)
                 vid_id = vids[0] if isinstance(vids, (list, tuple)) else vids
@@ -742,7 +742,7 @@ class Trainer:
                 total += torch.sum(mask[:, 0, :]).item()
 
         # Save the dictionary of arrays to a PyTorch file
-        cache_path = os.path.join(save_dir, f"/project/lt200353-pcllm/3d_report_gen/cas_colon/ASFORMER/FOLD1_test_predictions_epoch_{epoch + 1}.pt")
+        cache_path = os.path.join(save_dir, f"/project/lt200353-pcllm/3d_report_gen/cas_colon/ASFORMER/FOLD2_test_predictions_epoch_{epoch + 1}.pt")
         torch.save(prediction_cache, cache_path)
 
         acc = float(correct) / total
