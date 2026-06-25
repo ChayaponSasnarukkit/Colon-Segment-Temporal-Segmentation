@@ -100,99 +100,103 @@ def safe_ce_loss(logits, targets, criterion, ignore_index=-100):
         return logits.sum() * 0.0 
     return criterion(logits, targets)
 
-# --- TRAINING LOOP ---
-def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16, 
+def train_one_epoch(model, dataloader, optimizer, device, virtual_batch_size, accumulation_steps=16, 
                     lambda_smooth=0.5, lambda_jump=0.0, with_future=True, ignore_index=-100):
     model.train()
     total_loss = 0.0
     steps = 0
-    worker_states = {}
     
-    # Standard CE for Thumos (You can calculate class weights if needed)
-    print("ignore index", ignore_index)
-    #criterion = nn.CrossEntropyLoss(torch.tensor(weights, dtype=torch.float32, device=device), ignore_index=ignore_index)
+    # --- SLOT STATE TRACKING ---
+    slot_states = [None] * virtual_batch_size 
+    
     transition_penalty_loss = TransitionPenaltyLoss(num_classes=model.num_classes).to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     optimizer.zero_grad() 
 
     for step, batch in enumerate(tqdm(dataloader, desc="Training")):
-        # Unpack batch (Matches the ThumosStreamingDataset return)
-        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
+        vision_embeddings, contexts, labels, future_labels, reset_masks, context_masks, session_names = batch
         
-        vision_embeddings = vision_embeddings.to(device)
-        contexts = contexts.to(device) if contexts is not None else None
-        labels = labels.to(device)
-        future_labels = future_labels.to(device)
-        reset_mask = reset_mask.to(device)
-        context_masks = context_masks.to(device) if context_masks is not None else None
-        
-        # Handle Context Masking (if using memory bank)
-        valid_contexts = None
-        if contexts is not None:
-            # We take the max valid context length in the batch to save compute
-            actual_K = context_masks.sum(dim=1).max().int().item()
-            if actual_K > 0:
-                valid_contexts = contexts[:, :actual_K, :]
+        batch_loss = 0.0
+        num_of_valid_grad_in_vbatch = 0 
+
+        # --- LOOP THROUGH VIRTUAL BATCH ONE-BY-ONE ---
+        for i in range(virtual_batch_size):
+            v_emb = vision_embeddings[i].unsqueeze(0).to(device)      
+            lbls = labels[i].unsqueeze(0).to(device)                  
+            f_lbls = future_labels[i].unsqueeze(0).to(device)         
+            
+            # 1. Reset the state FIRST (frees VRAM for padding slots)
+            if reset_masks[i].item():
+                slot_states[i] = None 
+                
+            # 2. Skip padded/ignored instructions properly
+            if (lbls == ignore_index).all() and (f_lbls == ignore_index).all():
+                continue
+
+            # 3. Handle Context Logic for B=1
+            valid_ctx = None
+            if contexts is not None:
+                ctx = contexts[i].unsqueeze(0).to(device)
+                c_mask = context_masks[i].unsqueeze(0).to(device)
+                
+                actual_K = c_mask.sum().int().item()
+                if actual_K > 0:
+                    valid_ctx = ctx[:, :actual_K, :]
+                else:
+                    valid_ctx = torch.zeros((1, 1, ctx.shape[2]), device=device)
+
+            # 4. Forward Pass 
+            logits_wo, f_logits, logits_w, next_state = model(
+                vision_embeddings=v_emb, 
+                contexts=valid_ctx,
+                pass_states=slot_states[i],  
+                labels=lbls 
+            )
+            
+            # 5. Save the state for this slot's next chunk
+            slot_states[i] = detach_states(next_state)
+            
+            # 6. Calculate Losses 
+            if with_future:
+                loss_wo = safe_ce_loss(logits_wo.view(-1, model.num_classes), lbls.view(-1), criterion, ignore_index=ignore_index)
+                loss_w  = safe_ce_loss(logits_w.view(-1, model.num_classes), lbls.view(-1), criterion, ignore_index=ignore_index)
+                
+                if isinstance(model, ContextMambaCmeRT):
+                    loss_future = safe_ce_loss(f_logits.view(-1, model.num_classes), f_lbls[:, -1, :].view(-1), criterion, ignore_index=ignore_index)
+                else:
+                    loss_future = safe_ce_loss(f_logits.view(-1, model.num_classes), f_lbls.view(-1), criterion, ignore_index=ignore_index)
+
+                ce_loss = (0.15 * loss_wo) + loss_w + (0.4 * loss_future)
+                smooth_loss = compute_temporal_smoothing_loss(logits_w, lbls)
+                jump_loss = transition_penalty_loss(logits_w, lbls)
             else:
-                # Fallback if context is all empty
-                valid_contexts = torch.zeros((contexts.shape[0], 1, contexts.shape[2]), device=device)
+                ce_loss = safe_ce_loss(logits_wo.view(-1, model.num_classes), lbls.view(-1), criterion, ignore_index=ignore_index)
+                smooth_loss = compute_temporal_smoothing_loss(logits_w, lbls)
+                jump_loss = transition_penalty_loss(logits_w, lbls)
 
-        # State Management
-        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
-        current_states = worker_states.get(w_id, None)
-        if current_states is not None:
-            current_states = apply_reset_mask(current_states, reset_mask)
+            item_loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
+            
+            # Accumulate the loss for the virtual batch
+            batch_loss += item_loss
+            num_of_valid_grad_in_vbatch += 1
 
-        # Forward Pass
-        logits_wo_future, future_logits, logits_w_future, next_states = model(
-            vision_embeddings=vision_embeddings, 
-            contexts=valid_contexts,
-            pass_states=current_states,
-            labels=labels 
-        )
+        # --- OPTIMIZATION STEP ---
+        # Only backward if at least one slot wasn't purely padding
+        if num_of_valid_grad_in_vbatch > 0:
+            # Scale loss by the number of VALID chunks, not the fixed batch size
+            batch_loss = (batch_loss / num_of_valid_grad_in_vbatch) / accumulation_steps
+            batch_loss.backward()
+            
+            total_loss += (batch_loss.item() * accumulation_steps)
+            steps += 1
         
-        if with_future:
-
-            # --- Multi-Objective CrossEntropy Losses ---
-            loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
-            loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index) #criterion(logits_w_future.view(-1, model.num_classes), labels.view(-1))
-
-            if isinstance(model, ContextMambaCmeRT):
-                # only use the last one
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels[:, -1, :].view(-1), criterion, ignore_index=ignore_index)
-            else:
-                loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion, ignore_index=ignore_index)
-
-            ce_loss = (0.15*loss_wo + loss_w + 0.4*loss_future)
-
-            # --- Custom Temporal Constraints ---
-            # Apply constraints to the final, most refined predictions (logits_w_future)
-            smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
-        else:
-            # If no future, just ignore future and with_future logits.
-            # Optimize using only logits_wo_future
-            ce_loss = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion, ignore_index=ignore_index)
-            #loss_wo = ce_loss
-            smooth_loss = compute_temporal_smoothing_loss(logits_w_future, labels)
-            jump_loss = transition_penalty_loss(logits_w_future, labels)
-
-        loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
-        loss = loss / accumulation_steps
-        
-        loss.backward()
-        
+        # Optimizer step based on accumulation
         if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader):
             optimizer.step()
             optimizer.zero_grad()
-        
-        worker_states[w_id] = detach_states(next_states)
-        total_loss += (loss.item() * accumulation_steps)
-        steps += 1
 
-        if step % 10 == 0:
-            print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
-                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, Jump: {jump_loss.item():.4f})")
+        if step % 10 == 0 and num_of_valid_grad_in_vbatch > 0:
+            print(f"  [Train] Step {step} | Total Loss: {batch_loss.item() * accumulation_steps:.4f}")
             
     return total_loss / (steps if steps > 0 else 1)
 
