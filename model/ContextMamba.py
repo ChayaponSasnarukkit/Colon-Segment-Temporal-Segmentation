@@ -1897,6 +1897,308 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# ==========================================
+# 1. NEW DUAL-STREAM FUSION MODULE
+# ==========================================
+class TwoStreamFusion(nn.Module):
+    """
+    Replicates the CMeRT visual + motion fusion strategy:
+    Independent Projection -> Concatenation -> Compression
+    """
+    def __init__(self, visual_dim, motion_dim, d_model):
+        super().__init__()
+        
+        # 1. Independent Projections
+        self.visual_proj = nn.Sequential(
+            nn.Linear(visual_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.motion_proj = nn.Sequential(
+            nn.Linear(motion_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 2. Final Fusion Compression (2 * d_model -> d_model)
+        self.fusion_proj = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, visual_input, motion_input):
+        v_emb = self.visual_proj(visual_input)
+        m_emb = self.motion_proj(motion_input)
+        
+        fused = torch.cat((v_emb, m_emb), dim=-1)
+        return self.fusion_proj(fused)
+
+
+# ==========================================
+# 2. UPDATED CONTEXTMAMBAV2 MODEL
+# ==========================================
+class ContextMambaForThumosv2(nn.Module):
+    def __init__(
+        self,
+        base_model, # Assuming MixerModel type
+        d_model: int,
+        num_classes: int,
+        num_future: int,
+        vision_dim = 2048, # explicitly defined for RGB
+        motion_dim = 1024, # explicitly defined for Flow
+        compression_ratio: float = 240.0,
+        target_fps: float = 30.0,
+        context_fps: float = 4.0,
+        query_fps: float = 30.0,
+        dropout: float = 0.1,
+        future_fps: float = None,
+        use_multihead = False,
+        **factory_kwargs
+    ):
+        super().__init__()
+        # Store architecture variables
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.num_future = num_future
+        self.compression_ratio = compression_ratio
+        self.target_fps = target_fps
+        self.context_fps = context_fps
+        self.query_fps = query_fps
+        
+        # Save dimensions for slicing later
+        self.vision_dim = vision_dim
+        self.motion_dim = motion_dim
+
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
+            
+        # --- NEW: Instantiate the Modality Fusion Head ---
+        self.modality_fusion = TwoStreamFusion(
+            visual_dim=self.vision_dim,
+            motion_dim=self.motion_dim,
+            d_model=self.d_model
+        )
+
+        # Sub-modules
+        self.base_model = base_model
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) # 24, 10 for cas
+        self.fusion = QueryAwareMambaBlock(d_model=d_model)
+
+        # Anticipation: predict the next num_future second ahead using context and current
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, 
+                num_queries=num_future, 
+                d_state=128, 
+                d_conv=4, 
+                expand=2
+            )
+
+        # Classifiers
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
+            hidden_dim = in_dim * hidden_expansion
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),                    # 1. Normalization
+                nn.Linear(in_dim, hidden_dim),           # 3. Enrichment MLP (Layer 1)
+                nn.GELU(),                               # Activation
+                nn.Dropout(dropout),                     # 2. Dropout
+                nn.Linear(hidden_dim, out_classes)       # 3. Enrichment MLP (Head)
+            )
+
+        # Classifiers (Upgraded to MLP heads)
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
+        self.future_classifier = build_mlp_head(d_model, num_classes)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        
+        # Projection layer for fusing current state and anticipated future
+        self.future_cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, 
+            num_heads=8,          # 8 heads is standard for d_model=1024
+            dropout=dropout, 
+            batch_first=True
+        )
+        
+        # 2. Projection and Gating
+        self.future_fusion_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Gate to control information flow and prevent "phase bleeding"
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
+    
+    def compute_normalized_dts(self, B, M, K, device, dtype):
+        """
+        Calculates the normalized time scales based on the maximum temporal span.
+        M = query sequence length
+        K = scene/context sequence length
+        """
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
+        
+        s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+        dt_s_value = s_equiv_frames / max_equiv_frames
+        
+        q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+        dt_q_value = q_equiv_frames / max_equiv_frames
+        
+        dt_s = torch.full((B, K, 1), dt_s_value, device=device, dtype=dtype)
+        dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+        
+        return dt_s, dt_q
+
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
+        device = vision_embeddings.device
+        dtype = vision_embeddings.dtype
+
+        # ==========================================================
+        # --- NEW: SLICE AND FUSE THE CONCATENATED TENSORS ---
+        # Note: vision_embeddings and contexts contain BOTH RGB and Flow
+        # ==========================================================
+        
+        # 0a. Process Current Window
+        v_curr = vision_embeddings[..., :self.vision_dim]
+        m_curr = vision_embeddings[..., self.vision_dim:]
+        fused_embeddings = self.modality_fusion(v_curr, m_curr)
+
+        # 0b. Process Historical Context (Safely handling empty context)
+        if contexts is not None and contexts.shape[1] > 0:
+            v_ctx = contexts[..., :self.vision_dim]
+            m_ctx = contexts[..., self.vision_dim:]
+            fused_contexts = self.modality_fusion(v_ctx, m_ctx)
+        else:
+            fused_contexts = contexts
+
+        # ==========================================================
+        # --- CONTINUE WITH NORMAL ARCHITECTURE ---
+        # ==========================================================
+
+        # 1. Compress the historical context [B, T_long, D] -> [B, K, D]
+        # Use fused_contexts instead of raw contexts
+        compressed_ctx = self.compressor(fused_contexts)
+
+        # 2. Extract baseline query features -> [B, M, D]
+        # Use fused_embeddings instead of raw vision_embeddings
+        x, next_states = self.base_model(
+            vision_embeddings=fused_embeddings, 
+            pass_states=pass_states, 
+            #labels=labels
+        )
+
+        B, M, D = x.shape
+        if compressed_ctx is None:
+            # K=0, compress_context =[], dt_s=[]
+            # calculate dt_q
+            max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+            
+            q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+            dt_q_value = q_equiv_frames / max_equiv_frames
+            dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+            
+            enhanced_embeddings = x # no fusion needed since compress_context is empty
+            full_history = enhanced_embeddings # [B, K+M, D] since K=0, full_history = enhanced_embeddings
+            full_dt_s = dt_q # [B, K+M, 1] since K=0, full_dt_s = dt_q
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q) # no need to slice K since K=0
+            future_token_q = future_token # [B, M, num_future, D]
+
+        else:
+            K = compressed_ctx.shape[1]
+
+            dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
+        
+            # 3. Mamba Cross-Fusion
+            enhanced_embeddings = self.fusion(
+                F_s=compressed_ctx,
+                F_q=x,
+                delta_t_s=None,
+                delta_t_q=None
+            )
+            
+            # 4. Anticipation Head Setup
+            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) # [B, K+M, D]
+            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             # [B, K+M, 1]
+            
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            
+            # Output shape: [B, K+M, num_future, D]
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
+            
+            # We only want the anticipation corresponding to the M current query steps.
+            # We discard the predictions made over the K context prefix.
+            future_token = future_token[:, K:, :, :] # [B, M, num_future, D]
+
+            # 5. Future-Aware Fusion
+            future_token_q = future_token # [B, M, num_future, D]
+
+        # Baseline predictions
+        logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
+
+        future_logits = self.future_classifier(future_token)
+        
+        B, M, num_future, D = future_token_q.shape
+
+        # 2. Reshape for MultiheadAttention
+        # We collapse Batch and Sequence length so each step M acts as an independent query
+        # Query (Current Frame): [B*M, 1, D]
+        q = enhanced_embeddings.view(B * M, 1, D)
+        
+        # Keys/Values (Future Anticipation): [B*M, num_future, D]
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        # 3. Apply Cross Attention
+        # attn_output shape: [B*M, 1, D]
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        
+        # 4. Reshape back to sequence dimensions
+        attended_future = attn_output.view(B, M, D) # [B, M, D]
+
+        # --- Gated Residual Connection ---
+        
+        # Concatenate current and attended future
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1) # [B, M, 2D]
+        
+        # Project back to d_model
+        fusion_projection = self.future_fusion_proj(fused_features)                # [B, M, D]
+        
+        # Calculate dynamic gate (0 to 1) based on the concatenated features
+        gate = self.fusion_gate(fused_features)                                    # [B, M, D]
+        
+        # Apply gated residual connection and normalize
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        
+        # Final prediction using the safely fused features
+        logits_w_future = self.classifier_w_future(future_aware_embeddings)
+        
+        return logits_wo_future, future_logits, logits_w_future, next_states
+    
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 # --- Dependency Placeholders (Assuming these exist in your codebase) ---
 # from .your_modules import MixerModel, MultiLevelCompressor, QueryAwareMambaBlock, CausalQueryAwareMambaBlock, TimeScaleAwareMamba2
 

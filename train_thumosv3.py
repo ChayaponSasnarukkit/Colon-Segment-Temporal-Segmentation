@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 # --- IMPORTS FROM YOUR FILES ---
 from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
-from model.ContextMamba import ContextMambaForThumosv2, ContextMambaCmeRT, ContextMambav2
+from model.ContextMamba import ContextMambaForThumos, ContextMambaCmeRT, ContextMambav2
 from metrics import perframe_average_precision
 
 # -> CRITICAL UPDATE: Import the new Dataset and Sampler
@@ -369,14 +369,10 @@ def main():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Define the individual stream dimensions to slice the concatenated tensor
-    RGB_DIM = 2048
-    FLOW_DIM = 2048
+    VISION_DIM = train_dataset.feature_dim 
+    d_model = VISION_DIM
     
-    # Define the inner d_model dimension (standardized for Mamba efficiency)
-    d_model = 2048 
-    
-    config = MambaTemporalConfig(d_model=d_model, n_layer=8)
+    config = MambaTemporalConfig(d_model=d_model, n_layer=10)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=json_data.get('ignore_index', -100))
     
     model = MambaTemporalSegmentation(
@@ -387,11 +383,10 @@ def main():
         loss_fn=loss_fn
     )
     
-    full_model = ContextMambaForThumosv2(
+    full_model = ContextMambav2(
         base_model=model.backbone, 
-        vision_dim=RGB_DIM,         # Explicitly pass RGB dim for slicing
-        motion_dim=FLOW_DIM,        # Explicitly pass Flow dim for slicing
-        d_model=d_model,            # Internal unified projection dimension
+        vision_dim=VISION_DIM,
+        d_model=d_model, 
         num_classes=THUMOS_CLASSES,
         use_multihead=True,
         target_fps=4.0,
