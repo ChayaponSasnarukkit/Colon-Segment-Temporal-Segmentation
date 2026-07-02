@@ -52,7 +52,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 16,           
+        "d_state": 32,           
         "d_conv": 4,             
         "expand": 2,             
         "dt_rank": "auto",       
@@ -422,7 +422,7 @@ def seed_worker(worker_id):
 # --- 5. Main Execution ---
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
+    parser.add_argument("--config", type=str, default="giofheKP.json", help="Path to config file")
     args = parser.parse_args()
 
     if os.path.exists(args.config):
@@ -432,7 +432,7 @@ def main():
         hparams = {}
 
     # Structure/Config Extraction
-    cfg_seed = hparams.get("seed", 42)
+    cfg_seed = hparams.get("seed", 411)
     cfg_fold = hparams.get("fold", 1)
     cfg_epochs = hparams.get("epochs", 50)
     cfg_chunk_size = hparams.get("chunk_size", 1800) #30*60=1800
@@ -442,19 +442,20 @@ def main():
     cfg_lambda_smooth = hparams.get("lambda_smooth", 0.5)
      
     # Dataset specific parameters for 50salads
-    cfg_data_root = hparams.get("data_root", "/project/lt200353-pcllm/3d_report_gen/50salad/50salads")
-    cfg_split_dir = hparams.get("split_dir", "/project/lt200353-pcllm/3d_report_gen/50salad/50salads/splits")
-    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/50salad/checkpoints/50salads/fold{cfg_fold}/")
+    
+    cfg_data_root = hparams.get("data_root", "/project/lt200353-pcllm/3d_report_gen/50salads")
+    cfg_split_dir = hparams.get("split_dir", "/project/lt200353-pcllm/3d_report_gen/50salads/splits")
+    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/50salads/checkpoints/nmh_3fut24_05smooth_4vbatch_fold{cfg_fold}/")
     cfg_emb_dim = hparams.get("emb_dim", 2048) # 2048 is standard for 50salads I3D features
     
     cfg_fps = hparams.get("fps", 30)
     cfg_target_fps = hparams.get("target_fps", 30)
-    cfg_context_fps = hparams.get("context_fps", 4)
+    cfg_context_fps = hparams.get("context_fps", 4) # 15*60=900
     cfg_query_fps = hparams.get("query_fps", 30)
     cfg_compression_ratio = hparams.get("compression_ratio", 240.0)
     cfg_frames_per_query = hparams.get("frames_per_query", [24, 10])
     cfg_vbatch = hparams.get("vbatch", 4)
-
+    num_future = 12
     set_seed(cfg_seed)
     g = torch.Generator()
     g.manual_seed(cfg_seed)
@@ -469,26 +470,26 @@ def main():
         fold=cfg_fold, phase='train', chunk_size=cfg_chunk_size, 
         fps=cfg_fps, target_fps=cfg_target_fps, use_memory_bank=True,
         context_seconds=300, context_fps=cfg_context_fps, shuffle=True,
-        emb_dim=cfg_emb_dim
+        emb_dim=cfg_emb_dim, num_future_seconds=num_future
     )
     val_dataset = FiftySaladsStreamingDataset(
         data_root=cfg_data_root, batch_size_per_worker=1, split_dir=cfg_split_dir,
         fold=cfg_fold, phase='test', chunk_size=cfg_chunk_size, 
         fps=cfg_fps, target_fps=cfg_target_fps, use_memory_bank=True,
         context_seconds=300, context_fps=cfg_context_fps, shuffle=False,
-        emb_dim=cfg_emb_dim
+        emb_dim=cfg_emb_dim, num_future_seconds=num_future
     )
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_action_classes = len(CLASS_MAP)
-    config = MambaTemporalConfig(d_model=cfg_emb_dim, n_layer=4)
+    config = MambaTemporalConfig(d_model=cfg_emb_dim, n_layer=8)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100) 
     
     model = MambaTemporalSegmentation(config=config, vision_dim=cfg_emb_dim, num_classes=num_action_classes, device=device, loss_fn=loss_fn)
     
     full_model = ContextMambav2(
         base_model=model.backbone, d_model=cfg_emb_dim, num_classes=num_action_classes, 
-        num_future=12, use_multihead=True,
+        num_future=num_future, use_multihead=False,
         target_fps=cfg_target_fps, context_fps=cfg_context_fps, query_fps=cfg_query_fps, 
         compression_ratio=cfg_compression_ratio, frames_per_query=cfg_frames_per_query
     ).to(device)
