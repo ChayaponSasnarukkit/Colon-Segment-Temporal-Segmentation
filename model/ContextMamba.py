@@ -4,6 +4,268 @@ from model.MambaFusion import QueryAwareMambaBlock, CausalQueryAwareMambaBlock, 
 import torch
 import torch.nn as nn
 
+class StatefulCausalConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+        super().__init__()
+        self.receptive_field = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=0, dilation=dilation)
+
+    def forward(self, x, cache=None):
+        B, C, L = x.shape
+        if cache is None:
+            cache = torch.zeros((B, C, self.receptive_field), device=x.device, dtype=x.dtype)
+        
+        x_padded = torch.cat([cache, x], dim=-1)
+        out = self.conv(x_padded)
+        
+        if L >= self.receptive_field:
+            new_cache = x[:, :, -self.receptive_field:]
+        else:
+            new_cache = torch.cat([cache[:, :, L:], x], dim=-1)
+            
+        return out, new_cache
+
+class CausalTCNLayer(nn.Module):
+    def __init__(self, num_filters, dilation, dropout=0.1):
+        super().__init__()
+        self.causal_conv = StatefulCausalConv1d(num_filters, num_filters, kernel_size=3, dilation=dilation)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.conv1x1 = nn.Conv1d(num_filters, num_filters, kernel_size=1)
+
+    def forward(self, x, cache):
+        out, new_cache = self.causal_conv(x, cache)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.conv1x1(out)
+        return x + out, new_cache 
+
+class SingleStageCausalTCN(nn.Module):
+    def __init__(self, in_features, num_classes, num_layers=10, num_filters=64, dropout=0.1):
+        super().__init__()
+        self.num_layers = num_layers
+        self.conv_in = nn.Conv1d(in_features, num_filters, kernel_size=1)
+        
+        # 10 Dilated layers with exponentially increasing dilation
+        self.tcn_layers = nn.ModuleList([
+            CausalTCNLayer(num_filters, dilation=2**i, dropout=dropout) for i in range(num_layers)
+        ])
+        
+        self.conv_out = nn.Conv1d(num_filters, num_classes, kernel_size=1)
+
+    def forward(self, x, tcn_caches=None):
+        # x shape: (B, L, C) -> permute to (B, C, L) for 1D convolutions
+        x = x.permute(0, 2, 1)
+        x = self.conv_in(x)
+        
+        if tcn_caches is None:
+            tcn_caches = [None] * self.num_layers
+            
+        new_caches = []
+        for i, layer in enumerate(self.tcn_layers):
+            x, updated_layer_cache = layer(x, tcn_caches[i])
+            new_caches.append(updated_layer_cache)
+            
+        out = self.conv_out(x)
+        out = out.permute(0, 2, 1) # Back to (B, L, C)
+        
+        return out, new_caches
+    
+class ContextMambav2TASver(nn.Module):
+    def __init__(
+        self,
+        base_model, # Assuming MixerModel
+        d_model: int,
+        num_classes: int,
+        num_future: int,
+        vision_dim = None,
+        compression_ratio: float = 240.0, 
+        target_fps: float = 30.0,
+        context_fps: float = 4.0,
+        query_fps: float = 30.0,
+        dropout: float = 0.1,
+        future_fps: float = None,
+        use_multihead = False,
+        # TCN Specific Params
+        tcn_layers: int = 10,
+        tcn_filters: int = 64,
+        **factory_kwargs
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_classes = num_classes
+        self.num_future = num_future
+        self.compression_ratio = compression_ratio
+        self.target_fps = target_fps
+        self.context_fps = context_fps
+        self.query_fps = query_fps
+        if vision_dim is None:
+            vision_dim = d_model
+
+        if future_fps:
+            self.future_fps = future_fps
+        else:
+            self.future_fps = 1
+            
+        self.base_model = base_model
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) 
+        self.fusion = QueryAwareMambaBlock(d_model=d_model)
+
+        if use_multihead:
+            self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
+                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=2
+            )
+        else:
+            self.anticipation_head = CausalQueryAwareMambaBlockv2(
+                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=2
+            )
+
+        def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
+            hidden_dim = in_dim * hidden_expansion
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),                    
+                nn.Linear(in_dim, hidden_dim),           
+                nn.GELU(),                               
+                nn.Dropout(dropout),                     
+                nn.Linear(hidden_dim, out_classes)       
+            )
+
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
+        self.future_classifier = build_mlp_head(d_model, num_classes)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        
+        self.future_cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=8, dropout=dropout, batch_first=True
+        )
+        
+        self.future_fusion_proj = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.Sigmoid()
+        )
+
+        self.fusion_norm = nn.LayerNorm(d_model)
+        
+        # --- NEW: Temporal Action Segmentation (TAS) Head ---
+        self.tcn = SingleStageCausalTCN(
+            in_features=d_model, 
+            num_classes=num_classes, 
+            num_layers=tcn_layers, 
+            num_filters=tcn_filters, 
+            dropout=dropout
+        )
+    
+    def compute_normalized_dts(self, B, M, K, device, dtype):
+        max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
+        
+        s_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+        dt_s_value = s_equiv_frames / max_equiv_frames
+        
+        q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+        dt_q_value = q_equiv_frames / max_equiv_frames
+        
+        dt_s = torch.full((B, K, 1), dt_s_value, device=device, dtype=dtype)
+        dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+        
+        return dt_s, dt_q
+
+    def forward(self, vision_embeddings, contexts, pass_states=None, labels=None, use_temporal_scale=True):
+        device = vision_embeddings.device
+        dtype = vision_embeddings.dtype
+        
+        # --- State Unpacking ---
+        base_pass_states = None
+        tcn_pass_states = None
+        if pass_states is not None and isinstance(pass_states, dict):
+            base_pass_states = pass_states.get('base_states', None)
+            tcn_pass_states = pass_states.get('tcn_caches', None)
+
+        compressed_ctx = self.compressor(contexts)
+
+        x, base_next_states = self.base_model(
+            vision_embeddings=vision_embeddings, 
+            pass_states=base_pass_states, 
+        )
+
+        B, M, D = x.shape
+        if compressed_ctx is None:
+            max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
+            q_equiv_frames = 1.0 * (self.target_fps / self.query_fps)
+            dt_q_value = q_equiv_frames / max_equiv_frames
+            dt_q = torch.full((B, M, 1), dt_q_value, device=device, dtype=dtype)
+            
+            enhanced_embeddings = x 
+            full_history = enhanced_embeddings 
+            full_dt_s = dt_q 
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q) 
+            future_token_q = future_token 
+
+        else:
+            K = compressed_ctx.shape[1]
+            dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
+        
+            enhanced_embeddings = self.fusion(
+                F_s=compressed_ctx,
+                F_q=x,
+                delta_t_s=None,
+                delta_t_q=None
+            )
+            
+            full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) 
+            full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             
+            
+            dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
+            full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
+            
+            if use_temporal_scale:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q)
+            else:
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None)
+            
+            future_token = future_token[:, K:, :, :] 
+            future_token_q = future_token 
+
+        # --- Aux Classifiers ---
+        logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
+        future_logits = self.future_classifier(future_token)
+
+        B, M, num_future, D = future_token_q.shape
+
+        q = enhanced_embeddings.view(B * M, 1, D)
+        kv = future_token_q.view(B * M, num_future, D) 
+        
+        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        attended_future = attn_output.view(B, M, D)
+
+        # --- Gated Residual Connection ---
+        fused_features = torch.cat([enhanced_embeddings, attended_future], dim=-1)
+        fusion_projection = self.future_fusion_proj(fused_features)                
+        gate = self.fusion_gate(fused_features)                                    
+        future_aware_embeddings = self.fusion_norm(enhanced_embeddings + (gate * fusion_projection))
+        
+        # Aux Classifier 3
+        logits_w_future = self.classifier_w_future(future_aware_embeddings)
+        
+        # --- NEW: TAS Head (TCN) ---
+        # Pass the fully fused rich representations to the Causal TCN
+        final_logits, tcn_new_caches = self.tcn(future_aware_embeddings, tcn_pass_states)
+        
+        # --- Package the States ---
+        next_states = {
+            'base_states': base_next_states,
+            'tcn_caches': tcn_new_caches
+        }
+        
+        return logits_wo_future, future_logits, logits_w_future, final_logits, next_states
+
 class ContextMambaLargeForCasColon(nn.Module):
     def __init__(
         self,

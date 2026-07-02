@@ -3,7 +3,7 @@
 #SBATCH -N 1 -c 32
 #SBATCH --ntasks-per-node=1   # 4 tasks
 #SBATCH --gpus-per-node=1     # 4 GPUs total on the node
-#SBATCH -t 3:15:00                     # Specify maximum time limit (hour: minute: second)
+#SBATCH -t 4:15:00                     # Specify maximum time limit (hour: minute: second)
 #SBATCH -A lt200353               # Specify project name
 #SBATCH -J TEST                         # Specify job name
 
@@ -40,4 +40,4 @@ export LD_PRELOAD=$TORCH_LIB/libc10.so:$TORCH_LIB/libtorch.so:$TORCH_LIB/libtorc
 # 4. Run the training (Pass all variables)
 #srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_cas_colon_low_fps.py
 
-srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_50salads.py
+srun --export=ALL,LD_LIBRARY_PATH=$LD_LIBRARY_PATH,LD_PRELOAD=$LD_PRELOAD python train_50salads_with_tcn.py
