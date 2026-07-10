@@ -77,6 +77,7 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
                 inference_params_heads.seqlen_offset = 0
 
             frame_t = final_curr[:, t:t+1, :] 
+            label_t = final_lbl[:, t].item()
             
             # Pass both buckets
             _, _, logits_w_future, _ = model(
@@ -91,6 +92,11 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
             inference_params_global.seqlen_offset += 1
             # Heads clock stays local (resetting every chunk, or incrementing within chunk)
             inference_params_heads.seqlen_offset += 1
+
+            pred_t = torch.argmax(logits_w_future, dim=-1).item()
+            
+            all_preds.append(pred_t)
+            all_labels.append(label_t)
 
     # --- Calculate Final Metrics ---
     if len(all_labels) == 0:
