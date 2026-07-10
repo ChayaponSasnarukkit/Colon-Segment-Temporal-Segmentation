@@ -67,7 +67,7 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
             final_ctx_mask = final_ctx_mask.to(device)
 
             actual_K = final_ctx_mask[0].sum().int().item()
-            valid_contexts = final_ctx_mask[:, :actual_K, :]
+            valid_contexts = final_ctx[:, :actual_K, :]
             precomputed_ctx = model.compressor(valid_contexts)
 
         # ---------------------------------------------------------
