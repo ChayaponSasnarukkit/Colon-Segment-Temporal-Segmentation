@@ -1081,7 +1081,7 @@ class MultiheadCausalQueryAwareMambaBlockv2(nn.Module):
         # heads after they have been independently gated.
         self.out_proj = nn.Linear(d_model, d_model)
 
-    def forward(self, F_s, delta_t_s=None, delta_t_q=None):
+    def forward(self, F_s, delta_t_s=None, delta_t_q=None, inference_params=None):
         B, L, D = F_s.shape
         M = self.num_queries
         H = self.num_heads
@@ -1095,7 +1095,7 @@ class MultiheadCausalQueryAwareMambaBlockv2(nn.Module):
         F_q_norm = self.norm_q(F_q)
         
         # 2. Independent Causal Scanning
-        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s) # (B, L, D)
+        y_s = self.mamba_s(F_s_norm, delta_t=delta_t_s, inference_params=inference_params) # (B, L, D)
         y_q = self.mamba_q(F_q_norm, delta_t=delta_t_q) # (B, M, D)
         
         # 3. Key and Value Projection

@@ -560,7 +560,7 @@ class ContextMambav2_for_inference(nn.Module):
         #     **factory_kwargs
         # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15]) # 24, 10 for cas
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) # 24, 10 for cas
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         # Anticipation: predict the next num_future second ahead using context and current
@@ -706,22 +706,23 @@ class ContextMambav2_for_inference(nn.Module):
                 # Mamba's cache already remembers `compressed_ctx` from prefill.
                 full_history = enhanced_embeddings
                 full_dt_s = dt_q
+                
+                # --- SHIFT OFFSET FORWARD ---
+                if inference_params is not None:
+                    inference_params.seqlen_offset += K
             else:
-                # PREFILL PHASE: Feed the full history sequence.
                 full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) 
                 full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             
-            
+
+            # Pass to Anticipation Head
             if use_temporal_scale:
                 future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
             else:
                 future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params)
             
-            if is_decode:
-                # If decoding, the output sequence is already just length 1.
-                pass
-            else:
-                # Discard context predictions during prefill.
-                future_token = future_token[:, K:, :, :] 
+            # --- SHIFT OFFSET BACK ---
+            if is_decode and inference_params is not None:
+                inference_params.seqlen_offset -= K
 
             future_token_q = future_token
 
