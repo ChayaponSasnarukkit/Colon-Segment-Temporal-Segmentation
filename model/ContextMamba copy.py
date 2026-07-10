@@ -48,8 +48,9 @@ class ContextMambav2_for_inference(nn.Module):
         #     **factory_kwargs
         # ) # return hidden, next
         self.base_model = base_model
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[20, 15]) # 24, 10 for cas
-        self.fusion = QueryAwareMambaBlock(d_model=d_model) 
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) # 24, 10 for cas
+        self.fusion = QueryAwareMambaBlock(d_model=d_model)
+
         # Anticipation: predict the next num_future second ahead using context and current
         if use_multihead:
             self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
@@ -140,22 +141,23 @@ class ContextMambav2_for_inference(nn.Module):
                 module.layer_idx = idx
                 idx += 1
 
-    def forward(self, vision_embeddings, compressed_ctx, pass_states=None, labels=None, use_temporal_scale=True, inference_params=None):
+    def forward(self, vision_embeddings, compressed_ctx, pass_states=None, labels=None, use_temporal_scale=True, inference_params_global=None, inference_params_heads=None, chunk_step=0):
         device = vision_embeddings.device
         dtype = vision_embeddings.dtype
 
         # 1. Compress historical context (Bidirectional, no cache needed)
         # compressed_ctx = self.compressor(contexts)
+        global_offset = inference_params_heads.seqlen_offset if inference_params_heads is not None else 0
 
         # 2. Extract baseline query features -> [B, M, D]
         x, next_states = self.base_model(
             vision_embeddings=vision_embeddings, 
             pass_states=pass_states, 
-            inference_params=inference_params # Pass cache down
+            inference_params=inference_params_global # Pass cache down
         )
 
         B, M, D = x.shape
-        is_decode = inference_params is not None and inference_params.seqlen_offset > 0
+        is_decode = chunk_step > 0
 
         if compressed_ctx is None:
             max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps)
@@ -168,20 +170,20 @@ class ContextMambav2_for_inference(nn.Module):
             full_dt_s = dt_q 
             dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
-            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params_heads)
             future_token_q = future_token 
 
         else:
             K = compressed_ctx.shape[1]
             dt_s, dt_q = self.compute_normalized_dts(B, M, K, device=device, dtype=dtype)
         
-            # 3. Mamba Cross-Fusion
+            # 3. Mamba Cross-Fusion (Runs on Local Time)
             enhanced_embeddings = self.fusion(
                 F_s=compressed_ctx,
                 F_q=x,
                 delta_t_s=None,
                 delta_t_q=None,
-                inference_params=inference_params
+                inference_params=inference_params_heads
             )
 
             # 4. Anticipation Head Setup
@@ -189,29 +191,32 @@ class ContextMambav2_for_inference(nn.Module):
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
 
             if is_decode:
-                # DECODE PHASE: Only feed the new token! 
-                # Mamba's cache already remembers `compressed_ctx` from prefill.
+                # DECODE: Feed only the current frame
                 full_history = enhanced_embeddings
                 full_dt_s = dt_q
+                
+                # We still need the +K offset fix for the anticipation head!
+                if inference_params_heads is not None:
+                    inference_params_heads.seqlen_offset = chunk_step + K
             else:
-                # PREFILL PHASE: Feed the full history sequence.
+                # PREFILL (chunk_step == 0): Feed context + first frame
+                # This automatically overwrites the cache from the previous chunk!
                 full_history = torch.cat([compressed_ctx, enhanced_embeddings], dim=1) 
                 full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             
             
             if use_temporal_scale:
-                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params_heads)
             else:
-                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params)
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params_heads)
             
-            if is_decode:
-                # If decoding, the output sequence is already just length 1.
-                pass
-            else:
+            if not is_decode:
                 # Discard context predictions during prefill.
                 future_token = future_token[:, K:, :, :] 
 
             future_token_q = future_token
 
+        if inference_params_heads is not None:
+            inference_params_heads.seqlen_offset = global_offset
         # Baseline predictions
         logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
         future_logits = self.future_classifier(future_token_q)

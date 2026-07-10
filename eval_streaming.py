@@ -93,10 +93,10 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
             # Heads clock stays local (resetting every chunk, or incrementing within chunk)
             inference_params_heads.seqlen_offset += 1
 
-            pred_t = torch.argmax(logits_w_future, dim=-1).item()
-            
-            all_preds.append(pred_t)
-            all_labels.append(label_t)
+            if label_t != -100:
+                pred_t = torch.argmax(logits_w_future, dim=-1).item()
+                all_preds.append(pred_t)
+                all_labels.append(label_t)
 
     # --- Calculate Final Metrics ---
     if len(all_labels) == 0:
