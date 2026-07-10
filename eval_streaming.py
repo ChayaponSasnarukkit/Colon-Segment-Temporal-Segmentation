@@ -72,21 +72,16 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
             frame_t = final_curr[:, t:t+1, :] 
             label_t = final_lbl[:, t].item()
             
-            # Skip padding frames completely
-            if label_t == -100:
-                # We still need to increment the offset to keep time accurate if we skip!
-                # However, usually padding is at the end of the video, so skipping is safe.
-                continue
-
-            # Forward pass for a SINGLE frame
+            # Pass `t` as the chunk_step!
             _, _, logits_w_future, _ = model(
                 vision_embeddings=frame_t,
                 compressed_ctx=precomputed_ctx, 
                 use_temporal_scale=True,
-                inference_params=inference_params
+                inference_params=inference_params,
+                chunk_step=t  # <--- NEW
             )
             
-            # Tell Mamba's cache we moved forward exactly 1 step in time
+            # Tick the GLOBAL clock forward
             inference_params.seqlen_offset += 1
             
             # Extract prediction
@@ -119,7 +114,7 @@ def main():
     # Standard contiguous dataset (Not the test overlapping one) to prove exact match
     val_dataset = MedicalStreamingDataset(
         "./cv_folds_generated/fold1_test.csv", # Make sure this fold matches your weight path
-        "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
+        "/project/lt200353-pcllm/3d_report_gen/cas_colon/features_dinov3/", 
         1, 
         chunk_size=1800, 
         fps=60,            
