@@ -575,7 +575,8 @@ def main():
     g.manual_seed(cfg_seed)
 
     os.makedirs(cfg_save_dir, exist_ok=True)
-    best_model_path = "/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i431_4_full_shuffle/fold1/lr5e5_b4.pth"
+    #best_model_path = "/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i431_4_full_shuffle/fold1/lr5e5_b4.pth"
+    best_model_path = "/project/lt200353-pcllm/3d_report_gen/cas_colon/mid_a4tune3i411_3_full_shuffle/fold1/lr5e5_b4.pth"
     cache_save_path = os.path.join(cfg_save_dir, f"new_predictions_fold{cfg_fold}.npz")
 
     # Initialize CAS Dataset
@@ -670,14 +671,12 @@ def main():
     #     full_model.load_state_dict(torch.load(best_model_path, map_location=device))
     
     # cache_predictions(full_model, val_loader, device, cache_save_path)
-    print("\n--- Validation Check (Pre-Train) ---")
-    val_loss, val_acc, val_f1_macro, val_f1_per_class, _, _, _ = validate(full_model, val_loader, device, transition_penalty_loss)
-    print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | Macro F1: {val_f1_macro:.4f}\n")
-    
     print("\n--- Starting Post-Training Analysis Cache ---")
     if os.path.exists(best_model_path):
         full_model.load_state_dict(torch.load(best_model_path, map_location=device))
-    
+    print("\n--- Validation Check (Post-Train) ---")
+    val_loss, val_acc, val_f1_macro, val_f1_per_class, _, _, _ = validate(full_model, val_loader, device, transition_penalty_loss)
+    print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | Macro F1: {val_f1_macro:.4f}\n") 
     # Define file paths dynamically based on your config fold
     plot_save_path = os.path.join(cfg_save_dir, f"bias_plot_fold{cfg_fold}.png")
     data_save_path = os.path.join(cfg_save_dir, f"bias_data_fold{cfg_fold}.csv")
