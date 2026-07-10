@@ -599,6 +599,90 @@ def apply_reset_mask(states, reset_mask):
         
     return masked_states
 
+def detach_states(states):
+    if states is None:
+        return None
+    
+    # --- NEW: Handle dictionary-based states (TCN / TAS model) ---
+    if isinstance(states, dict):
+        detached = {}
+        
+        # 1. Detach base Mamba states
+        if states.get('base_states') is not None:
+            detached['base_states'] = [
+                (s.detach().clone(), c.detach().clone()) if s is not None else (None, None)
+                for s, c in states['base_states']
+            ]
+        else:
+            detached['base_states'] = None
+            
+        # 2. Detach TCN caches
+        if states.get('tcn_caches') is not None:
+            detached['tcn_caches'] = [
+                cache.detach().clone() if cache is not None else None 
+                for cache in states['tcn_caches']
+            ]
+        else:
+            detached['tcn_caches'] = None
+            
+        return detached
+        
+    # --- OLD: Handle list-based states (Standard Mamba) ---
+    return [
+        (s.detach().clone(), c.detach().clone()) if s is not None else (None, None) 
+        for s, c in states
+    ]
+
+
+def apply_reset_mask(states, reset_mask):
+    """
+    Selectively zeroes out the states for specific videos in the batch.
+    mask shape: (Batch,) where True means "reset this video".
+    """
+    if states is None:
+        return None
+
+    # Helper function using your original robust broadcasting logic
+    def _mask_tensor(tensor, mask):
+        if tensor is None:
+            return None
+        # Reshape mask to broadcast across the state dimensions: (B, 1, 1...)
+        broadcast_mask = mask.view(-1, *[1]*(tensor.dim() - 1))
+        return tensor.masked_fill(broadcast_mask, 0.0)
+
+    # --- NEW: Handle dictionary-based states (TCN / TAS model) ---
+    if isinstance(states, dict):
+        reset_states = {}
+        
+        # 1. Reset base Mamba states
+        if states.get('base_states') is not None:
+            reset_states['base_states'] = [
+                (_mask_tensor(s, reset_mask), _mask_tensor(c, reset_mask))
+                for s, c in states['base_states']
+            ]
+        else:
+            reset_states['base_states'] = None
+            
+        # 2. Reset TCN caches
+        if states.get('tcn_caches') is not None:
+            reset_states['tcn_caches'] = [
+                _mask_tensor(cache, reset_mask)
+                for cache in states['tcn_caches']
+            ]
+        else:
+            reset_states['tcn_caches'] = None
+            
+        return reset_states
+
+    # --- OLD: Handle list-based states (Standard Mamba) ---
+    masked_states = []
+    for ssm_state, conv_state in states:
+        new_ssm = _mask_tensor(ssm_state, reset_mask)
+        new_conv = _mask_tensor(conv_state, reset_mask)
+        masked_states.append((new_ssm, new_conv))
+        
+    return masked_states
+
 def train_tbptt_fast(model, dataloader, optimizer, device, epochs=1):
     model.train()
     
