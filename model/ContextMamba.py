@@ -659,7 +659,7 @@ class ContextMambav2_for_inference(nn.Module):
 
         # 1. Compress historical context (Bidirectional, no cache needed)
         # compressed_ctx = self.compressor(contexts)
-        global_offset = inference_params.seqlen_offset if inference_params is not None else 0
+        global_offset = inference_params_heads.seqlen_offset if inference_params_heads is not None else 0
 
         # 2. Extract baseline query features -> [B, M, D]
         x, next_states = self.base_model(
