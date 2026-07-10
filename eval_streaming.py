@@ -64,7 +64,11 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
         precomputed_ctx = None
         if final_ctx is not None and final_ctx_mask.sum() > 0:
             # Compress the historical context once per chunk (Amortization)
-            precomputed_ctx = model.compressor(final_ctx)
+            final_ctx_mask = final_ctx_mask.to(device)
+
+            actual_K = final_ctx_mask[0].sum().int().item()
+            valid_contexts = final_ctx_mask[:, :actual_K, :]
+            precomputed_ctx = model.compressor(valid_contexts)
 
         # ---------------------------------------------------------
         # THE STREAMING LOOP: Feed 1 frame at a time
