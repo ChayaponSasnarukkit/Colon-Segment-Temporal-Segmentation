@@ -682,7 +682,7 @@ class ContextMambav2_for_inference(nn.Module):
             full_dt_s = dt_q 
             dt_q_val = (self.target_fps/self.future_fps) / (self.compression_ratio * (self.target_fps / self.context_fps))
             full_dt_q = torch.full((B, self.num_future, 1), dt_q_val, device=device, dtype=dtype)
-            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+            future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params_heads)
             future_token_q = future_token 
 
         else:
