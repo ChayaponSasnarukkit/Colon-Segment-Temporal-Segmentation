@@ -653,7 +653,7 @@ class ContextMambav2_for_inference(nn.Module):
                 module.layer_idx = idx
                 idx += 1
 
-    def forward(self, vision_embeddings, compressed_ctx, pass_states=None, labels=None, use_temporal_scale=True, inference_params=None, chunk_step=0):
+    def forward(self, vision_embeddings, compressed_ctx, pass_states=None, labels=None, use_temporal_scale=True, inference_params_global=None, inference_params_heads=None, chunk_step=0):
         device = vision_embeddings.device
         dtype = vision_embeddings.dtype
 
@@ -665,7 +665,7 @@ class ContextMambav2_for_inference(nn.Module):
         x, next_states = self.base_model(
             vision_embeddings=vision_embeddings, 
             pass_states=pass_states, 
-            inference_params=inference_params # Pass cache down
+            inference_params=inference_params_global # Pass cache down
         )
 
         B, M, D = x.shape
@@ -695,7 +695,7 @@ class ContextMambav2_for_inference(nn.Module):
                 F_q=x,
                 delta_t_s=None,
                 delta_t_q=None,
-                inference_params=inference_params
+                inference_params=inference_params_heads
             )
 
             # 4. Anticipation Head Setup
@@ -708,8 +708,8 @@ class ContextMambav2_for_inference(nn.Module):
                 full_dt_s = dt_q
                 
                 # We still need the +K offset fix for the anticipation head!
-                if inference_params is not None:
-                    inference_params.seqlen_offset = chunk_step + K
+                if inference_params_heads is not None:
+                    inference_params_heads.seqlen_offset = chunk_step + K
             else:
                 # PREFILL (chunk_step == 0): Feed context + first frame
                 # This automatically overwrites the cache from the previous chunk!
@@ -717,9 +717,9 @@ class ContextMambav2_for_inference(nn.Module):
                 full_dt_s = torch.cat([dt_s, dt_q], dim=1)                             
             
             if use_temporal_scale:
-                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params)
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=full_dt_s, delta_t_q=full_dt_q, inference_params=inference_params_heads)
             else:
-                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params)
+                future_token = self.anticipation_head(F_s=full_history, delta_t_s=None, delta_t_q=None, inference_params=inference_params_heads)
             
             if not is_decode:
                 # Discard context predictions during prefill.
@@ -727,8 +727,8 @@ class ContextMambav2_for_inference(nn.Module):
 
             future_token_q = future_token
 
-        if inference_params is not None:
-            inference_params.seqlen_offset = global_offset
+        if inference_params_heads is not None:
+            inference_params_heads.seqlen_offset = global_offset
         # Baseline predictions
         logits_wo_future = self.classifier_wo_future(enhanced_embeddings)
         future_logits = self.future_classifier(future_token_q)

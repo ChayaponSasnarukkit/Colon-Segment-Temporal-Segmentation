@@ -35,7 +35,8 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
     model.assign_layer_indices()
     
     # Initialize Mamba's global state cache
-    inference_params = InferenceParams(max_seqlen=100000, max_batch_size=1)
+    inference_params_global = InferenceParams(max_seqlen=100000, max_batch_size=1)
+    inference_params_heads = InferenceParams(max_seqlen=1800, max_batch_size=1)
     
     all_preds = []
     all_labels = []
@@ -57,8 +58,8 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
 
         # Handle Video Boundaries (Reset cache for new videos)
         if final_mask[0].item(): 
-            inference_params.key_value_memory_dict.clear()
-            inference_params.seqlen_offset = 0
+            inference_params_global.key_value_memory_dict.clear()
+            inference_params_global.seqlen_offset = 0
             
         precomputed_ctx = None
         if final_ctx is not None and final_ctx_mask.sum() > 0:
@@ -68,27 +69,28 @@ def evaluate_streaming_performance(model, dataloader, device="cuda"):
         # ---------------------------------------------------------
         # THE STREAMING LOOP: Feed 1 frame at a time
         # ---------------------------------------------------------
-        for t in range(Chunk_Len):
+
+        for t in tqdm(range(Chunk_Len)):
+            # If starting a new chunk (t == 0), reset only the heads
+            if t == 0:
+                inference_params_heads.key_value_memory_dict.clear()
+                inference_params_heads.seqlen_offset = 0
+
             frame_t = final_curr[:, t:t+1, :] 
-            label_t = final_lbl[:, t].item()
             
-            # Pass `t` as the chunk_step!
+            # Pass both buckets
             _, _, logits_w_future, _ = model(
                 vision_embeddings=frame_t,
                 compressed_ctx=precomputed_ctx, 
-                use_temporal_scale=True,
-                inference_params=inference_params,
-                chunk_step=t  # <--- NEW
+                inference_params_global=inference_params_global,
+                inference_params_heads=inference_params_heads,
+                chunk_step=t
             )
             
-            # Tick the GLOBAL clock forward
-            inference_params.seqlen_offset += 1
-            
-            # Extract prediction
-            pred_t = torch.argmax(logits_w_future, dim=-1).item()
-            
-            all_preds.append(pred_t)
-            all_labels.append(label_t)
+            # Global clock keeps ticking
+            inference_params_global.seqlen_offset += 1
+            # Heads clock stays local (resetting every chunk, or incrementing within chunk)
+            inference_params_heads.seqlen_offset += 1
 
     # --- Calculate Final Metrics ---
     if len(all_labels) == 0:
