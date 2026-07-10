@@ -108,7 +108,8 @@ class ContextMambav2TASver(nn.Module):
             self.future_fps = 1
             
         self.base_model = base_model
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10]) 
+        num_layers_per_stage = factory_kwargs.get('num_layers_per_stage', 4)
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10], num_layers_per_stage=num_layers_per_stage) 
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         if use_multihead:
@@ -134,10 +135,19 @@ class ContextMambav2TASver(nn.Module):
         self.future_classifier = build_mlp_head(d_model, num_classes)
         self.classifier_w_future = build_mlp_head(d_model, num_classes)
         
-        self.future_cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=8, dropout=dropout, batch_first=True
-        )
-        
+        #self.future_cross_attn = nn.MultiheadAttention(
+        #    embed_dim=d_model, num_heads=8, dropout=dropout, batch_first=True
+        #)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, 
+            nhead=8, 
+            dim_feedforward=d_model * 4, # Standard 4x expansion
+            dropout=dropout,
+            batch_first=True
+        ) 
+        num_cross_attn_layers = factory_kwargs.get('num_cross_attn_layers', 2)
+        self.future_cross_attn = nn.TransformerDecoder(decoder_layer, num_layers=num_cross_attn_layers)
+
         self.future_fusion_proj = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.LayerNorm(d_model),
@@ -242,7 +252,8 @@ class ContextMambav2TASver(nn.Module):
         q = enhanced_embeddings.view(B * M, 1, D)
         kv = future_token_q.view(B * M, num_future, D) 
         
-        attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        #attn_output, _ = self.future_cross_attn(query=q, key=kv, value=kv)
+        attn_output = self.future_cross_attn(tgt=q, memory=kv)
         attended_future = attn_output.view(B, M, D)
 
         # --- Gated Residual Connection ---

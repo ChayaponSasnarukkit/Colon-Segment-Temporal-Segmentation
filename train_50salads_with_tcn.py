@@ -13,9 +13,93 @@ from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score
 
 # --- Import Models & 50Salads Dataset ---
-from model.CMamba import MambaTemporalSegmentation, detach_states, apply_reset_mask
+from model.CMamba import MambaTemporalSegmentation#, detach_states, apply_reset_mask
 from model.ContextMamba import ContextMambav2TASver
 from dataset.salads import FiftySaladsStreamingDataset 
+
+def detach_states(states):
+    if states is None:
+        return None
+    
+    # --- NEW: Handle dictionary-based states (TCN / TAS model) ---
+    if isinstance(states, dict):
+        detached = {}
+        
+        # 1. Detach base Mamba states
+        if states.get('base_states') is not None:
+            detached['base_states'] = [
+                (s.detach().clone(), c.detach().clone()) if s is not None else (None, None)
+                for s, c in states['base_states']
+            ]
+        else:
+            detached['base_states'] = None
+            
+        # 2. Detach TCN caches
+        if states.get('tcn_caches') is not None:
+            detached['tcn_caches'] = [
+                cache.detach().clone() if cache is not None else None 
+                for cache in states['tcn_caches']
+            ]
+        else:
+            detached['tcn_caches'] = None
+            
+        return detached
+        
+    # --- OLD: Handle list-based states (Standard Mamba) ---
+    return [
+        (s.detach().clone(), c.detach().clone()) if s is not None else (None, None) 
+        for s, c in states
+    ]
+
+
+def apply_reset_mask(states, reset_mask):
+    """
+    Selectively zeroes out the states for specific videos in the batch.
+    mask shape: (Batch,) where True means "reset this video".
+    """
+    if states is None:
+        return None
+
+    # Helper function using your original robust broadcasting logic
+    def _mask_tensor(tensor, mask):
+        if tensor is None:
+            return None
+        # Reshape mask to broadcast across the state dimensions: (B, 1, 1...)
+        broadcast_mask = mask.view(-1, *[1]*(tensor.dim() - 1))
+        return tensor.masked_fill(broadcast_mask, 0.0)
+
+    # --- NEW: Handle dictionary-based states (TCN / TAS model) ---
+    if isinstance(states, dict):
+        reset_states = {}
+        
+        # 1. Reset base Mamba states
+        if states.get('base_states') is not None:
+            reset_states['base_states'] = [
+                (_mask_tensor(s, reset_mask), _mask_tensor(c, reset_mask))
+                for s, c in states['base_states']
+            ]
+        else:
+            reset_states['base_states'] = None
+            
+        # 2. Reset TCN caches
+        if states.get('tcn_caches') is not None:
+            reset_states['tcn_caches'] = [
+                _mask_tensor(cache, reset_mask)
+                for cache in states['tcn_caches']
+            ]
+        else:
+            reset_states['tcn_caches'] = None
+            
+        return reset_states
+
+    # --- OLD: Handle list-based states (Standard Mamba) ---
+    masked_states = []
+    for ssm_state, conv_state in states:
+        new_ssm = _mask_tensor(ssm_state, reset_mask)
+        new_conv = _mask_tensor(conv_state, reset_mask)
+        masked_states.append((new_ssm, new_conv))
+        
+    return masked_states
 
 # try:
 #     from train_mamba import f1_based_weights
@@ -52,7 +136,7 @@ class MambaTemporalConfig:
     n_layer: int = 8             
     d_intermediate: int = 0      
     ssm_cfg: dict = field(default_factory=lambda: {
-        "d_state": 32,           
+        "d_state": 16,           
         "d_conv": 4,             
         "expand": 2,             
         "dt_rank": "auto",       
@@ -222,7 +306,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=4,
         loss_final = safe_ce_loss(tcn_logits.view(-1, model.num_classes), labels.view(-1), criterion)
 
         # TCN handles the final segmentation, so we apply smoothing penalties directly to it
-        ce_loss = (0.5*loss_wo + 1.0*loss_w + 0.5*loss_future + 2.0*loss_final) / 4.0
+        ce_loss = (0.0*loss_wo + 1.0*loss_w + 1.0*loss_future + 2.0*loss_final) / 4.0
         smooth_loss = compute_temporal_smoothing_loss(tcn_logits, labels)
         jump_loss = transition_penalty_loss(tcn_logits, labels)
         
@@ -292,7 +376,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         loss_final = safe_ce_loss(tcn_logits.view(-1, model.num_classes), labels.view(-1), criterion)
 
         # TCN handles the final segmentation, so we apply smoothing penalties directly to it
-        ce_loss = (0.5*loss_wo + 1.0*loss_w + 0.5*loss_future + 2.0*loss_final) / 4.0
+        ce_loss = (0.0*loss_wo + 1.0*loss_w + 1.0*loss_future + 4.0*loss_final) / 6
         smooth_loss = compute_temporal_smoothing_loss(tcn_logits, labels)
         jump_loss = transition_penalty_loss(tcn_logits, labels)
         
@@ -438,12 +522,12 @@ def main():
         hparams = {}
 
     # Structure/Config Extraction
-    cfg_seed = hparams.get("seed", 411)
-    cfg_fold = hparams.get("fold", 1)
+    cfg_seed = hparams.get("seed", 44)
+    cfg_fold = hparams.get("fold", 4)
     cfg_epochs = hparams.get("epochs", 50)
-    cfg_chunk_size = hparams.get("chunk_size", 1800) #30*60=1800
+    cfg_chunk_size = hparams.get("chunk_size", 300) #30*10=1800
     cfg_base_lr = hparams.get("lr", 5e-5)
-    cfg_weight_decay = hparams.get("weight_decay", 1e-3)
+    cfg_weight_decay = hparams.get("weight_decay", 0.5e-4)
     cfg_patience = hparams.get("patience", 25)
     cfg_lambda_smooth = hparams.get("lambda_smooth", 0.5)
      
@@ -451,15 +535,15 @@ def main():
     
     cfg_data_root = hparams.get("data_root", "/project/lt200353-pcllm/3d_report_gen/50salads")
     cfg_split_dir = hparams.get("split_dir", "/project/lt200353-pcllm/3d_report_gen/50salads/splits")
-    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/50salads/checkpoints/nmh_3fut24_05smooth_4vbatch_fold{cfg_fold}/")
+    cfg_save_dir = hparams.get("save_dir", f"/project/lt200353-pcllm/3d_report_gen/50salads/checkpoints/tcnkkk_mh_3fut12_15smooth_4vbatch_fold{cfg_fold}/")
     cfg_emb_dim = hparams.get("emb_dim", 2048) # 2048 is standard for 50salads I3D features
     
     cfg_fps = hparams.get("fps", 30)
     cfg_target_fps = hparams.get("target_fps", 30)
-    cfg_context_fps = hparams.get("context_fps", 4) # 15*60=900
+    cfg_context_fps = hparams.get("context_fps", 15) # 15*60=900
     cfg_query_fps = hparams.get("query_fps", 30)
-    cfg_compression_ratio = hparams.get("compression_ratio", 240.0)
-    cfg_frames_per_query = hparams.get("frames_per_query", [24, 10])
+    cfg_compression_ratio = hparams.get("compression_ratio", 150.0)
+    cfg_frames_per_query = hparams.get("frames_per_query", [15, 10])
     cfg_vbatch = hparams.get("vbatch", 4)
     num_future = 12
     set_seed(cfg_seed)
@@ -475,27 +559,27 @@ def main():
         data_root=cfg_data_root, batch_size_per_worker=1, split_dir=cfg_split_dir,
         fold=cfg_fold, phase='train', chunk_size=cfg_chunk_size, 
         fps=cfg_fps, target_fps=cfg_target_fps, use_memory_bank=True,
-        context_seconds=300, context_fps=cfg_context_fps, shuffle=True,
+        context_seconds=150, context_fps=cfg_context_fps, shuffle=True,
         emb_dim=cfg_emb_dim, num_future_seconds=num_future
     )
     val_dataset = FiftySaladsStreamingDataset(
         data_root=cfg_data_root, batch_size_per_worker=1, split_dir=cfg_split_dir,
         fold=cfg_fold, phase='test', chunk_size=cfg_chunk_size, 
         fps=cfg_fps, target_fps=cfg_target_fps, use_memory_bank=True,
-        context_seconds=300, context_fps=cfg_context_fps, shuffle=False,
+        context_seconds=150, context_fps=cfg_context_fps, shuffle=False,
         emb_dim=cfg_emb_dim, num_future_seconds=num_future
     )
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_action_classes = len(CLASS_MAP)
-    config = MambaTemporalConfig(d_model=cfg_emb_dim, n_layer=8)
+    config = MambaTemporalConfig(d_model=cfg_emb_dim, n_layer=4)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100) 
     
     model = MambaTemporalSegmentation(config=config, vision_dim=cfg_emb_dim, num_classes=num_action_classes, device=device, loss_fn=loss_fn)
     
     full_model = ContextMambav2TASver(
         base_model=model.backbone, d_model=cfg_emb_dim, num_classes=num_action_classes, 
-        num_future=num_future, use_multihead=False,
+        num_future=num_future, use_multihead=True,
         target_fps=cfg_target_fps, context_fps=cfg_context_fps, query_fps=cfg_query_fps, 
         compression_ratio=cfg_compression_ratio, frames_per_query=cfg_frames_per_query
     ).to(device)

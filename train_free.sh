@@ -3,7 +3,7 @@
 #SBATCH -N 1 -c 32
 #SBATCH --ntasks-per-node=1   # 4 tasks
 #SBATCH --gpus-per-node=1     # 4 GPUs total on the node
-#SBATCH -t 4:15:00                     # Specify maximum time limit (hour: minute: second)
+#SBATCH -t 8:15:00                     # Specify maximum time limit (hour: minute: second)
 #SBATCH -A lt200353               # Specify project name
 #SBATCH -J TEST                         # Specify job name
 
