@@ -459,6 +459,319 @@ class MedicalStreamingDataset(IterableDataset):
             
             yield final_curr, final_ctx, final_lbl, final_future_lbl, final_mask, final_ctx_mask, worker_id
 
+import os
+import torch
+import pandas as pd
+import numpy as np
+import math
+from torch.utils.data import IterableDataset, get_worker_info
+from PIL import Image
+
+class MedicalTestStreamingDataset(IterableDataset):
+    def __init__(self, 
+                 csv_path, 
+                 video_root, 
+                 batch_size_per_worker, 
+                 chunk_size=1024,
+                 window_stride=512, # NEW: How many frames to slide the window forward
+                 
+                 # FPS Configuration
+                 fps=60,            # Source Video FPS
+                 target_fps=30,     # Desired Inference FPS
+                 
+                 # Context / Memory Bank Config
+                 use_memory_bank=False,
+                 context_seconds=100, 
+                 context_fps=5,
+                 num_future_seconds=3,
+
+                 use_emb=True,
+                 emb_dim=768,
+                 transform=None):
+        
+        self.df = pd.read_csv(csv_path)
+        self.video_root = video_root
+        self.batch_size = batch_size_per_worker
+        self.chunk_size = chunk_size
+        self.window_stride = window_stride # Stride in terms of output frames
+        self.transform = transform
+
+        self.use_emb = use_emb
+        self.emb_dim = emb_dim
+        
+        # --- FPS / Stride Logic ---
+        self.fps = fps
+        self.target_fps = target_fps
+        self.step = int(fps / target_fps)  
+        
+        if self.step < 1:
+            raise ValueError("Target FPS cannot be higher than Source FPS")
+            
+        # The actual raw frames we skip ahead after each chunk
+        self.stride_needed = self.window_stride * self.step
+
+        # Memory Bank Setup
+        self.use_memory_bank = use_memory_bank
+        self.context_seconds = context_seconds
+        self.context_stride = int(fps / context_fps) 
+        self.context_len_frames = context_seconds * fps 
+        self.context_num_samples = context_seconds * context_fps
+
+        self.num_future = num_future_seconds
+        self.future_offsets = torch.arange(1, self.num_future + 1) * fps
+
+    def _load_images(self, video_id, frame_indices):
+        batch_images = []
+        video_dir = os.path.join(self.video_root, str(video_id))
+        
+        for idx in frame_indices:
+            if idx < 0:
+                batch_images.append(torch.zeros(3, 224, 224))
+                continue
+                
+            img_path = os.path.join(video_dir, f"{idx}.jpg")
+            try:
+                with Image.open(img_path) as img:
+                    img = img.convert('RGB')
+                    if self.transform:
+                        img = self.transform(img)
+                    else:
+                        img = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+                    batch_images.append(img)
+            except (FileNotFoundError, OSError):
+                batch_images.append(torch.zeros(3, 224, 224))
+
+        if len(batch_images) == 0:
+            return torch.zeros(len(frame_indices), 3, 224, 224)
+            
+        return torch.stack(batch_images)
+
+    def _get_embeddings(self, full_emb_tensor, indices):
+        out = torch.zeros(len(indices), self.emb_dim)
+        video_len = full_emb_tensor.shape[0]
+        
+        for i, frame_idx in enumerate(indices):
+            if 0 <= frame_idx < video_len:
+                out[i] = full_emb_tensor[frame_idx]
+        return out
+
+    def __len__(self):
+        if 'TotalFrames' not in self.df.columns:
+            raise ValueError("The CSV must contain a 'TotalFrames' column to calculate __len__.")
+
+        # Test set shouldn't shuffle
+        all_indices = list(range(len(self.df)))
+
+        idx_queue = all_indices.copy()
+        active_chunks_left = [0] * self.batch_size
+
+        def get_chunks(row_idx):
+            frames = self.df.iloc[row_idx]['TotalFrames']
+            if frames <= 0: return 0
+            # NEW: Calculate chunks based on the sliding stride, not chunk size
+            return math.ceil(frames / self.stride_needed)
+
+        for i in range(self.batch_size):
+            if idx_queue:
+                active_chunks_left[i] = get_chunks(idx_queue.pop(0))
+
+        total_batches = 0
+        while any(chunks > 0 for chunks in active_chunks_left):
+            total_batches += 1
+            for i in range(self.batch_size):
+                if active_chunks_left[i] > 0:
+                    active_chunks_left[i] -= 1
+                    if active_chunks_left[i] == 0 and idx_queue:
+                        active_chunks_left[i] = get_chunks(idx_queue.pop(0))
+
+        return total_batches
+
+    def __iter__(self):
+        worker_info = get_worker_info()
+        all_indices = list(range(len(self.df))) # No shuffle in test dataset
+        
+        if worker_info is None:
+            my_indices = all_indices
+            worker_id = 0
+        else:
+            per_worker = int(math.ceil(len(all_indices) / float(worker_info.num_workers)))
+            start = worker_info.id * per_worker
+            end = min(start + per_worker, len(all_indices))
+            my_indices = all_indices[start:end]
+            worker_id = worker_info.id
+
+        def start_stream(row_idx):
+            row = self.df.iloc[row_idx]
+            vid_id = row['VideoID']
+            video_emb = None
+            total_frames = 50000 
+            
+            if self.use_emb:
+                emb_path = os.path.join(self.video_root, f"{vid_id}.pt")
+                try:
+                    video_emb = torch.load(emb_path, map_location='cpu')
+                    total_frames = video_emb.shape[0]
+                except FileNotFoundError:
+                    video_emb = torch.zeros(1, self.emb_dim)
+                    total_frames = 1
+            else:
+                total_frames = int(row.get('TotalFrames', 50000)) 
+            
+            # Using your global build_dense_label function
+            dense_labels = build_dense_label(row, total_frames, self.fps)
+            dense_labels = torch.from_numpy(dense_labels).long()            
+            
+            return {
+                'cursor': 0,
+                'total': total_frames,
+                'vid_id': vid_id,
+                'labels': dense_labels,
+                'row_idx': row_idx,
+                'embeddings': video_emb
+            }
+
+        active_streams = [None] * self.batch_size 
+        idx_queue = my_indices.copy()
+        
+        for i in range(self.batch_size):
+            if idx_queue:
+                active_streams[i] = start_stream(idx_queue.pop(0))
+
+        while any(s is not None for s in active_streams):
+            batch_curr = []
+            batch_ctx = []
+            batch_lbl = []
+            batch_future_lbl = []
+            batch_indices = [] # NEW: to track frame indices
+            reset_mask = []
+            batch_ctx_mask = []
+
+            for i in range(self.batch_size):
+                stream = active_streams[i]
+                
+                if stream is None:
+                    if self.use_emb:
+                        batch_curr.append(torch.zeros(self.chunk_size, self.emb_dim))
+                        if self.use_memory_bank:
+                            batch_ctx.append(torch.zeros(self.context_num_samples, self.emb_dim))
+                    else:
+                        batch_curr.append(torch.zeros(self.chunk_size, 3, 224, 224))
+                        if self.use_memory_bank:
+                            batch_ctx.append(torch.zeros(self.context_num_samples, 3, 224, 224))
+                    batch_lbl.append(torch.full((self.chunk_size,), -100, dtype=torch.long))
+                    batch_future_lbl.append(torch.full((self.chunk_size, self.num_future), -100, dtype=torch.long))
+                    batch_indices.append(torch.full((self.chunk_size,), -1, dtype=torch.long))
+                    reset_mask.append(True)
+                    if self.use_memory_bank:
+                        batch_ctx_mask.append(torch.zeros(self.context_num_samples, dtype=torch.bool))
+                    continue
+
+                curr_start = stream['cursor']
+                span_needed = self.chunk_size * self.step
+                curr_end = min(curr_start + span_needed, stream['total'])
+                
+                curr_indices = list(range(curr_start, curr_end, self.step))
+                
+                ctx_stop = curr_start
+                ctx_start_ideal = ctx_stop - (self.context_num_samples * self.context_stride)
+                raw_ctx_indices = range(ctx_start_ideal, ctx_stop, self.context_stride)
+                valid_ctx_indices = [idx for idx in raw_ctx_indices if idx >= 0]
+                num_valid = len(valid_ctx_indices)
+                num_pad = self.context_num_samples - num_valid
+                
+                curr_tensor = None
+                ctx_tensor = None
+                ctx_mask = None 
+
+                if self.use_emb:
+                    curr_tensor = self._get_embeddings(stream['embeddings'], curr_indices)
+                else:
+                    curr_tensor = self._load_images(stream['vid_id'], curr_indices)
+
+                if self.use_memory_bank:
+                    if self.use_emb:
+                        valid_ctx_tensor = self._get_embeddings(stream['embeddings'], valid_ctx_indices)
+                    else:
+                        valid_ctx_tensor = self._load_images(stream['vid_id'], valid_ctx_indices)
+                    
+                    if num_pad > 0:
+                        if self.use_emb:
+                            pad_tensor = torch.zeros(num_pad, self.emb_dim)
+                        else:
+                            pad_tensor = torch.zeros(num_pad, 3, 224, 224)
+                        ctx_tensor = torch.cat([valid_ctx_tensor, pad_tensor], dim=0)
+                        ctx_mask = torch.cat([
+                            torch.ones(num_valid, dtype=torch.bool),
+                            torch.zeros(num_pad, dtype=torch.bool)
+                        ])
+                    else:
+                        ctx_tensor = valid_ctx_tensor
+                        ctx_mask = torch.ones(num_valid, dtype=torch.bool)
+
+                lbl_tensor = stream['labels'][curr_indices] 
+
+                curr_idx_tensor = torch.tensor(curr_indices).unsqueeze(1) 
+                offsets_tensor = self.future_offsets.unsqueeze(0)
+                future_indices_tensor = curr_idx_tensor + offsets_tensor
+                valid_future_mask = future_indices_tensor < stream['total']
+                future_lbl_tensor = torch.full((len(curr_indices), self.num_future), -100, dtype=torch.long)
+                valid_f_idx = future_indices_tensor[valid_future_mask]
+                future_lbl_tensor[valid_future_mask] = stream['labels'][valid_f_idx]
+
+                # NEW: Create a tensor tracking the raw frame indices for this chunk
+                frame_idx_tensor = torch.tensor(curr_indices, dtype=torch.long)
+
+                actual_sampled_len = len(curr_indices)
+                
+                if actual_sampled_len < self.chunk_size:
+                    pad_len = self.chunk_size - actual_sampled_len
+                    
+                    if self.use_emb:
+                        curr_pad = torch.zeros(pad_len, self.emb_dim)
+                    else:
+                        curr_pad = torch.zeros(pad_len, 3, 224, 224)
+                    curr_tensor = torch.cat([curr_tensor, curr_pad], dim=0)
+                    
+                    lbl_pad = torch.full((pad_len,), -100, dtype=torch.long)
+                    lbl_tensor = torch.cat([lbl_tensor, lbl_pad], dim=0)
+
+                    lbl_pad_future = torch.full((pad_len, self.num_future), -100, dtype=torch.long)
+                    future_lbl_tensor = torch.cat([future_lbl_tensor, lbl_pad_future], dim=0)
+
+                    # NEW: Pad the frame index tensor with -1 so we can ignore padded frames during evaluation
+                    idx_pad = torch.full((pad_len,), -1, dtype=torch.long)
+                    frame_idx_tensor = torch.cat([frame_idx_tensor, idx_pad], dim=0)
+
+                batch_curr.append(curr_tensor)
+                if self.use_memory_bank:
+                    batch_ctx.append(ctx_tensor)
+                    batch_ctx_mask.append(ctx_mask)
+                batch_lbl.append(lbl_tensor)
+                batch_future_lbl.append(future_lbl_tensor)
+                batch_indices.append(frame_idx_tensor)
+                
+                reset_mask.append(curr_start == 0)
+                
+                # NEW: Advance cursor using the customizable stride instead of the full chunk span
+                stream['cursor'] += self.stride_needed
+                
+                if stream['cursor'] >= stream['total']:
+                    if idx_queue:
+                        active_streams[i] = start_stream(idx_queue.pop(0))
+                    else:
+                        active_streams[i] = None
+
+            final_curr = torch.stack(batch_curr)
+            final_lbl = torch.stack(batch_lbl)
+            final_mask = torch.tensor(reset_mask)
+            final_ctx = torch.stack(batch_ctx) if self.use_memory_bank else None
+            final_ctx_mask = torch.stack(batch_ctx_mask) if self.use_memory_bank else None
+            final_future_lbl = torch.stack(batch_future_lbl)
+            final_idx = torch.stack(batch_indices) # Shape: [Batch_Size, Chunk_Size]
+            
+            # NOTE: We've appended `final_idx` to the output tuple!
+            yield final_curr, final_ctx, final_lbl, final_future_lbl, final_mask, final_ctx_mask, final_idx, worker_id
+
 # MedicalStreamingDataset(
 #     "/scratch/lt200353-pcllm/location/cas_colon/updated_Video_Label.csv", 
 #     "/scratch/lt200353-pcllm/location/cas_colon/features_dinov3", 
