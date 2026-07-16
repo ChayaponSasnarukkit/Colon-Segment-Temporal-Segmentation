@@ -3,7 +3,7 @@
 #SBATCH -N 1 -c 16
 #SBATCH --ntasks-per-node=1   # 4 tasks
 #SBATCH --gpus-per-node=1     # 4 GPUs total on the node
-#SBATCH -t 00:10:00                     # Specify maximum time limit (hour: minute: second)
+#SBATCH -t 03:10:00                     # Specify maximum time limit (hour: minute: second)
 #SBATCH -A lt200353               # Specify project name
 #SBATCH -J TEST                         # Specify job name
 
@@ -24,4 +24,4 @@ export TRANSFORMERS_OFFLINE=1
 
 #srun python extract_dinov3.py 
 #srun python extract_real_colonv2.py
-srun python fixed_extraction.py
+srun CUDA_VISIBLE_DEVICES=0 python ./data/feature_extraction/feature_extraction.py --config ./data/feature_extraction/ymls/feature_extraction_1x_RC.yml

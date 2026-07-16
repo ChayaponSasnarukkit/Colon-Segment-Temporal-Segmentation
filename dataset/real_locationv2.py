@@ -21,7 +21,7 @@ LABEL_MAP = {
     # "uncertain": -100,
 }
 NUM_CLASSES = len(LABEL_MAP)
-
+from collections import Counter
 class RealColonStreamingDataset(IterableDataset):
     def __init__(self, 
                  video_root, 
@@ -95,6 +95,33 @@ class RealColonStreamingDataset(IterableDataset):
 
         self.num_future = num_future_seconds
         self.future_offsets = torch.arange(1, self.num_future + 1) * fps
+    
+    def compute_weights(self):
+        """ Automatically compute class weights based on the loaded dataset split. """
+        print(f"Computing class weights for phase: {self.phase}...")
+        gts = []
+
+        for vid_id in self.df['VideoID']:
+            lbl_path = osp.join(self.video_root, f"{vid_id}_labels.npy")
+            if osp.exists(lbl_path):
+                raw_labels = np.load(lbl_path)
+                for lbl in raw_labels:
+                    lbl_str = lbl.decode('utf-8') if isinstance(lbl, bytes) else str(lbl)
+                    lbl_str = lbl_str.strip()
+                    val = LABEL_MAP.get(lbl_str, -100)
+                    if val != -100:
+                        gts.append(val)
+
+        cardinality = Counter(gts)
+        
+        # Guarantee ordering and account for classes that might be completely missing in a split
+        sorted_cardinality = [cardinality.get(k, 0) for k in range(NUM_CLASSES)]
+        total_samples = sum(sorted_cardinality)
+        
+        # Prevent division by zero if a split is missing a class
+        class_weights = [total_samples / count if count > 0 else 0.0 for count in sorted_cardinality]
+
+        return torch.tensor(class_weights)
 
     def _build_dataset_dataframe(self):
         data = []
