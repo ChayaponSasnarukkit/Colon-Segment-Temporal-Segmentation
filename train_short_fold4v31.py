@@ -582,10 +582,10 @@ def main():
     # with open(args.config, 'r') as f:
     #     hparams = json.load(f)
     hparams = {}
-    cfg_lr = hparams.get("lr", 0.5e-4)
+    cfg_lr = hparams.get("lr", 0.3e-4)
     cfg_weight_decay = hparams.get("weight_decay", 1e-2)
     cfg_scheduler_choice = hparams.get("scheduler_choice", "cosine_with_warmup").lower()
-    cfg_virtual_batch_size = hparams.get("virtual_batch_size", 24)
+    cfg_virtual_batch_size = hparams.get("virtual_batch_size", 16)
     cfg_freeze = hparams.get("freeze", False)
     cfg_pretrain_dir = hparams.get("pretrain_dir", "/project/lt200353-pcllm/3d_report_gen/real-colon/")
     cfg_weighted_loss = hparams.get("weighted_loss", True)
@@ -695,7 +695,7 @@ def main():
     best_val_loss = float('inf')
     save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/mid_smoothing_dampw_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "smoothexpansion2stages1batch24lr05.pth")
+    best_model_path = os.path.join(save_dir, "expansion2stages1batch16lr03.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
@@ -746,7 +746,7 @@ def main():
         print(class_weights_tensor, raw_counts)
     else:
         class_weights_tensor = None
-    # class_weights_tensor = train_dataset.compute_weights().to(device)
+    class_weights_tensor = train_dataset.compute_weights().to(device)
     print(class_weights_tensor)
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")

@@ -70,6 +70,81 @@ class SingleStageCausalTCN(nn.Module):
         out = out.permute(0, 2, 1) # Back to (B, L, C)
         
         return out, new_caches
+
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TwoStageCausalTCN(nn.Module):
+    def __init__(self, in_features, num_classes, num_layers=10, num_filters=64, dropout=0.1):
+        super().__init__()
+        self.num_layers = num_layers
+        
+        # =========================
+        # STAGE 1: Feature to Logits
+        # =========================
+        self.stage1_conv_in = nn.Conv1d(in_features, num_filters, kernel_size=1)
+        self.stage1_layers = nn.ModuleList([
+            CausalTCNLayer(num_filters, dilation=2**i, dropout=dropout) for i in range(num_layers)
+        ])
+        self.stage1_conv_out = nn.Conv1d(num_filters, num_classes, kernel_size=1)
+        
+        # =========================
+        # STAGE 2: Refinement Stage
+        # =========================
+        # Stage 2 takes the probability distribution (num_classes) from Stage 1 as input
+        self.stage2_conv_in = nn.Conv1d(num_classes, num_filters, kernel_size=1)
+        self.stage2_layers = nn.ModuleList([
+            CausalTCNLayer(num_filters, dilation=2**i, dropout=dropout) for i in range(num_layers)
+        ])
+        self.stage2_conv_out = nn.Conv1d(num_filters, num_classes, kernel_size=1)
+
+    def forward(self, x, tcn_caches=None):
+        # x shape: (B, L, C) -> permute to (B, C, L) for 1D convolutions
+        x = x.permute(0, 2, 1)
+        
+        # Initialize caches for both stages if not provided
+        if tcn_caches is None:
+            tcn_caches = {
+                'stage1': [None] * self.num_layers,
+                'stage2': [None] * self.num_layers
+            }
+            
+        stage1_caches = tcn_caches['stage1']
+        stage2_caches = tcn_caches['stage2']
+        
+        new_stage1_caches = []
+        new_stage2_caches = []
+        
+        # --- Stage 1 Forward Pass ---
+        feat1 = self.stage1_conv_in(x)
+        for i, layer in enumerate(self.stage1_layers):
+            feat1, updated_cache = layer(feat1, stage1_caches[i])
+            new_stage1_caches.append(updated_cache)
+            
+        out1_logits = self.stage1_conv_out(feat1)
+        
+        # --- Stage 2 Forward Pass ---
+        # Standard MS-TCN practice: apply softmax to Stage 1 logits before passing to Stage 2
+        out1_probs = F.softmax(out1_logits, dim=1) 
+        
+        feat2 = self.stage2_conv_in(out1_probs)
+        for i, layer in enumerate(self.stage2_layers):
+            feat2, updated_cache = layer(feat2, stage2_caches[i])
+            new_stage2_caches.append(updated_cache)
+            
+        out2_logits = self.stage2_conv_out(feat2)
+        
+        # Back to (B, L, C)
+        out1_logits = out1_logits.permute(0, 2, 1)
+        out2_logits = out2_logits.permute(0, 2, 1)
+        
+        # Package new caches
+        new_caches = {
+            'stage1': new_stage1_caches,
+            'stage2': new_stage2_caches
+        }
+        
+        return out1_logits, out2_logits, new_caches
     
 class ContextMambav2TASver(nn.Module):
     def __init__(
@@ -86,9 +161,11 @@ class ContextMambav2TASver(nn.Module):
         dropout: float = 0.1,
         future_fps: float = None,
         use_multihead = False,
+        hidden_expansion=2,
         # TCN Specific Params
         tcn_layers: int = 10,
         tcn_filters: int = 64,
+        num_stages: int = 1,
         **factory_kwargs
     ):
         super().__init__()
@@ -115,11 +192,11 @@ class ContextMambav2TASver(nn.Module):
 
         if use_multihead:
             self.anticipation_head = MultiheadCausalQueryAwareMambaBlockv2(
-                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=2
+                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=hidden_expansion
             )
         else:
             self.anticipation_head = CausalQueryAwareMambaBlockv2(
-                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=2
+                d_model=d_model, num_queries=num_future, d_state=128, d_conv=4, expand=hidden_expansion
             )
 
         def build_mlp_head(in_dim, out_classes, hidden_expansion=2):
@@ -132,9 +209,9 @@ class ContextMambav2TASver(nn.Module):
                 nn.Linear(hidden_dim, out_classes)       
             )
 
-        self.classifier_wo_future = build_mlp_head(d_model, num_classes)
-        self.future_classifier = build_mlp_head(d_model, num_classes)
-        self.classifier_w_future = build_mlp_head(d_model, num_classes)
+        self.classifier_wo_future = build_mlp_head(d_model, num_classes, hidden_expansion)
+        self.future_classifier = build_mlp_head(d_model, num_classes, hidden_expansion)
+        self.classifier_w_future = build_mlp_head(d_model, num_classes, hidden_expansion)
         
         #self.future_cross_attn = nn.MultiheadAttention(
         #    embed_dim=d_model, num_heads=8, dropout=dropout, batch_first=True
@@ -164,13 +241,23 @@ class ContextMambav2TASver(nn.Module):
         self.fusion_norm = nn.LayerNorm(d_model)
         
         # --- NEW: Temporal Action Segmentation (TAS) Head ---
-        self.tcn = SingleStageCausalTCN(
-            in_features=d_model, 
-            num_classes=num_classes, 
-            num_layers=tcn_layers, 
-            num_filters=tcn_filters, 
-            dropout=dropout
-        )
+        self.num_stages = num_stages
+        if num_stages==1:
+            self.tcn = SingleStageCausalTCN(
+                in_features=d_model, 
+                num_classes=num_classes, 
+                num_layers=tcn_layers, 
+                num_filters=tcn_filters, 
+                dropout=dropout
+            )
+        else:
+            self.tcn = TwoStageCausalTCN(
+                in_features=d_model, 
+                num_classes=num_classes, 
+                num_layers=tcn_layers, 
+                num_filters=tcn_filters, 
+                dropout=dropout
+            )
     
     def compute_normalized_dts(self, B, M, K, device, dtype):
         max_equiv_frames = self.compression_ratio * (self.target_fps / self.context_fps) 
@@ -268,7 +355,15 @@ class ContextMambav2TASver(nn.Module):
         
         # --- NEW: TAS Head (TCN) ---
         # Pass the fully fused rich representations to the Causal TCN
-        final_logits, tcn_new_caches = self.tcn(future_aware_embeddings, tcn_pass_states)
+        if self.num_stages==1:
+            final_logits, tcn_new_caches = self.tcn(future_aware_embeddings, tcn_pass_states)
+        else:
+            final_logits, tcn_1_logits, tcn_new_caches = self.tcn(future_aware_embeddings, tcn_pass_states)
+            next_states = {
+                'base_states': base_next_states,
+                'tcn_caches': tcn_new_caches
+            }
+            return logits_wo_future, future_logits, logits_w_future, tcn_1_logits, final_logits, next_states
         
         # --- Package the States ---
         next_states = {
