@@ -108,8 +108,9 @@ class ContextMambav2TASver(nn.Module):
             self.future_fps = 1
             
         self.base_model = base_model
+        frames_per_query = factory_kwargs.get('frames_per_query', [24, 10])
         num_layers_per_stage = factory_kwargs.get('num_layers_per_stage', 4)
-        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=[24, 10], num_layers_per_stage=num_layers_per_stage) 
+        self.compressor = MultiLevelCompressorv2(hidden_dim=d_model, frames_per_query=frames_per_query, num_layers_per_stage=num_layers_per_stage)
         self.fusion = QueryAwareMambaBlock(d_model=d_model)
 
         if use_multihead:

@@ -111,7 +111,61 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
 
     optimizer.zero_grad() 
 
-    for step, batch in enumerate(tqdm(dataloader)):
+    for step, batch in enumerate(tqdm(dataloader, desc="Training")):
+        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
+
+        vision_embeddings = vision_embeddings.to(device)
+        contexts = contexts.to(device)
+        labels = labels.to(device)
+        future_labels = future_labels.to(device)
+        reset_mask = reset_mask.to(device)
+        context_masks = context_masks.to(device)
+
+        actual_K = context_masks[0].sum().int().item()
+        valid_contexts = contexts[:, :actual_K, :]
+
+        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+        current_states = worker_states.get(w_id, None)
+
+        if current_states is not None:
+            current_states = apply_reset_mask(current_states, reset_mask)
+
+        logits_wo_future, future_logits, logits_w_future, tcn_logits, next_states = model(
+            vision_embeddings=vision_embeddings,
+            contexts=valid_contexts,
+            pass_states=current_states,
+            labels=labels
+        )
+
+        loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)
+        loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+        loss_final = safe_ce_loss(tcn_logits.view(-1, model.num_classes), labels.view(-1), criterion)
+
+        # TCN handles the final segmentation, so we apply smoothing penalties directly to it
+        ce_loss = (0.1*loss_wo + 0.2*loss_w + 0.2*loss_future + 1.0*loss_final)
+        smooth_loss = compute_temporal_smoothing_loss(tcn_logits, labels)
+        jump_loss = 0#transition_penalty_loss(tcn_logits, labels)
+
+        loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
+        loss = loss / accumulation_steps
+        loss.backward()
+
+        if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader):
+            optimizer.step()
+            optimizer.zero_grad()
+
+        worker_states[w_id] = detach_states(next_states)
+        total_loss += (loss.item() * accumulation_steps)
+        steps += 1
+
+        if step % 50 == 0:
+            print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
+                  f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f})")
+
+    return total_loss / (steps if steps > 0 else 1)
+
+    """for step, batch in enumerate(tqdm(dataloader)):
         vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
         
         vision_embeddings = vision_embeddings.to(device)
@@ -173,8 +227,8 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
             print(f"  [Train] Step {step} | Total Loss: {loss.item() * accumulation_steps:.4f} "
                   f"(CE: {ce_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}"), #Jump: {jump_loss.item():.4f})")
             
-    return total_loss / (steps if steps > 0 else 1)
-
+    return total_loss / (steps if steps > 0 else 1)"""
+import collections
 @torch.no_grad()
 def validate(model, dataloader, device, transition_penalty_loss, 
              lambda_smooth=0.0, lambda_jump=0.0, with_future=True, weighted=None):
@@ -195,7 +249,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
     all_preds, all_labels = [], []
 
-    for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
+    """for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
         vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
         
         vision_embeddings = vision_embeddings.to(device)
@@ -262,7 +316,71 @@ def validate(model, dataloader, device, transition_penalty_loss,
         valid_indices = labels_flat != -100
         
         all_preds.extend(preds_flat[valid_indices])
-        all_labels.extend(labels_flat[valid_indices])
+        all_labels.extend(labels_flat[valid_indices])"""
+    all_preds, all_labels = [], []
+    video_preds_dict, video_labels_dict = collections.defaultdict(list), collections.defaultdict(list)
+    completed_video_preds, completed_video_labels = [], []
+
+    for step, batch in enumerate(tqdm(dataloader, desc="Validating")):
+        vision_embeddings, contexts, labels, future_labels, reset_mask, context_masks, worker_id = batch
+        vision_embeddings = vision_embeddings.to(device)
+        contexts = contexts.to(device)
+        labels = labels.to(device)
+        future_labels = future_labels.to(device)
+        reset_mask = reset_mask.to(device)
+        context_masks = context_masks.to(device)
+
+        actual_K = context_masks[0].sum().int().item()
+        valid_contexts = contexts[:, :actual_K, :]
+
+        w_id = int(worker_id[0].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+        current_states = worker_states.get(w_id, None)
+
+        if current_states is not None:
+            current_states = apply_reset_mask(current_states, reset_mask)
+
+        logits_wo_future, future_logits, logits_w_future, tcn_logits, next_states = model(
+            vision_embeddings=vision_embeddings,
+            contexts=valid_contexts,
+            pass_states=current_states,
+            labels=labels
+        )
+
+        loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
+        loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)
+        loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+        loss_final = safe_ce_loss(tcn_logits.view(-1, model.num_classes), labels.view(-1), criterion)
+
+        # TCN handles the final segmentation, so we apply smoothing penalties directly to it
+        ce_loss = loss_final
+        smooth_loss = compute_temporal_smoothing_loss(tcn_logits, labels)
+        jump_loss = 0#transition_penalty_loss(tcn_logits, labels)
+
+        loss = ce_loss + (lambda_smooth * smooth_loss) + (lambda_jump * jump_loss)
+        total_loss += loss.item()
+        steps += 1
+        worker_states[w_id] = detach_states(next_states)
+
+        preds = torch.argmax(tcn_logits, dim=-1)
+
+        for b in range(preds.size(0)):
+            b_w_id = int(worker_id[b].item()) if isinstance(worker_id, torch.Tensor) else int(worker_id)
+            b_reset = bool(reset_mask[b].item()) if isinstance(reset_mask, torch.Tensor) else bool(reset_mask)
+
+            if b_reset and len(video_preds_dict[b_w_id]) > 0:
+                completed_video_preds.append(video_preds_dict[b_w_id])
+                completed_video_labels.append(video_labels_dict[b_w_id])
+                video_preds_dict[b_w_id] = []
+                video_labels_dict[b_w_id] = []
+
+            p_flat, l_flat = preds[b].cpu().numpy(), labels[b].cpu().numpy()
+            valid_indices = l_flat != -100
+            valid_preds, valid_labels = p_flat[valid_indices].tolist(), l_flat[valid_indices].tolist()
+
+            all_preds.extend(valid_preds)
+            all_labels.extend(valid_labels)
+            video_preds_dict[b_w_id].extend(valid_preds)
+            video_labels_dict[b_w_id].extend(valid_labels)
 
     avg_loss = total_loss / (steps if steps > 0 else 1)
     print(f"  val_loss_wo:     {total_loss_wo / steps:.4f}")
@@ -464,19 +582,19 @@ def main():
     # with open(args.config, 'r') as f:
     #     hparams = json.load(f)
     hparams = {}
-    cfg_lr = hparams.get("lr", 1e-4)
+    cfg_lr = hparams.get("lr", 0.5e-4)
     cfg_weight_decay = hparams.get("weight_decay", 1e-2)
     cfg_scheduler_choice = hparams.get("scheduler_choice", "cosine_with_warmup").lower()
-    cfg_virtual_batch_size = hparams.get("virtual_batch_size", 16)
+    cfg_virtual_batch_size = hparams.get("virtual_batch_size", 24)
     cfg_freeze = hparams.get("freeze", False)
     cfg_pretrain_dir = hparams.get("pretrain_dir", "/project/lt200353-pcllm/3d_report_gen/real-colon/")
     cfg_weighted_loss = hparams.get("weighted_loss", True)
 
     print(f"Loaded Hyperparameters: {hparams}")
 
-    set_seed(42)
+    set_seed(441)
     g = torch.Generator()
-    g.manual_seed(42)
+    g.manual_seed(441)
     
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/project/lt200353-pcllm/3d_report_gen/real-colon/"
@@ -565,13 +683,13 @@ def main():
     # else:
     #     print("correct choice")
     #     full_model = ContextMambaForRealColon(base_model=model.backbone, d_model=1024, num_classes=num_action_classes, num_future=3, frames_per_query=[10, 6], compression_ratio=60.0).to(device)
-    full_model = ContextMambav2ForRealColon(
+    full_model = ContextMambav2TASver(
         base_model=model.backbone, d_model=1024, num_classes=num_action_classes, 
         num_future=12, use_multihead=True,
         target_fps=5, context_fps=5, query_fps=5, num_layers_per_stage=4,
         compression_ratio=300.0, frames_per_query=[30, 10]
     ).to(device)
-    epochs = 50
+    epochs = 100
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
@@ -628,7 +746,7 @@ def main():
         print(class_weights_tensor, raw_counts)
     else:
         class_weights_tensor = None
-    #class_weights_tensor = train_dataset.compute_weights().to(device)
+    class_weights_tensor = train_dataset.compute_weights().to(device)
     print(class_weights_tensor)
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
