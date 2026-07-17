@@ -130,7 +130,7 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
         if current_states is not None:
             current_states = apply_reset_mask(current_states, reset_mask)
 
-        logits_wo_future, future_logits, logits_w_future, tcn_logits, next_states = model(
+        logits_wo_future, future_logits, logits_w_future, tcn_tmp_logits, tcn_logits, next_states = model(
             vision_embeddings=vision_embeddings,
             contexts=valid_contexts,
             pass_states=current_states,
@@ -140,10 +140,11 @@ def train_one_epoch(model, dataloader, optimizer, device, accumulation_steps=16,
         loss_wo = safe_ce_loss(logits_wo_future.view(-1, model.num_classes), labels.view(-1), criterion)
         loss_w  = safe_ce_loss(logits_w_future.view(-1, model.num_classes), labels.view(-1), criterion)
         loss_future = safe_ce_loss(future_logits.view(-1, model.num_classes), future_labels.view(-1), criterion)
+        loss_tcn_tmp = safe_ce_loss(tcn_tmp_logits.view(-1, model.num_classes), labels.view(-1), criterion)
         loss_final = safe_ce_loss(tcn_logits.view(-1, model.num_classes), labels.view(-1), criterion)
 
         # TCN handles the final segmentation, so we apply smoothing penalties directly to it
-        ce_loss = (0.1*loss_wo + 0.2*loss_w + 0.2*loss_future + 1.0*loss_final)
+        ce_loss = (0.1*loss_wo + 0.1*loss_w + 0.2*loss_tcn_tmp + 0.2*loss_future + 1.0*loss_final)
         smooth_loss = compute_temporal_smoothing_loss(tcn_logits, labels)
         jump_loss = 0#transition_penalty_loss(tcn_logits, labels)
 
@@ -339,7 +340,7 @@ def validate(model, dataloader, device, transition_penalty_loss,
         if current_states is not None:
             current_states = apply_reset_mask(current_states, reset_mask)
 
-        logits_wo_future, future_logits, logits_w_future, tcn_logits, next_states = model(
+        logits_wo_future, future_logits, logits_w_future, tcn_tmp_logits, tcn_logits, next_states = model(
             vision_embeddings=vision_embeddings,
             contexts=valid_contexts,
             pass_states=current_states,
