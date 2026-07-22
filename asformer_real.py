@@ -525,7 +525,7 @@ def main():
             save_dir=save_dir,
             batch_gen=batch_gen_train,
             num_epochs=num_epochs,
-            batch_size=1, 
+            batch_size=6, 
             learning_rate=lr,
             batch_gen_tst=batch_gen_test
         )
