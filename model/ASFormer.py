@@ -43,46 +43,47 @@ class AttentionHelper(nn.Module):
         return out, attention
 
 class AttLayer(nn.Module):
-    def __init__(self, q_dim, k_dim, v_dim, r1, r2, r3, bl, stage, att_type):  # r1 = r2
+    def __init__(self, q_dim, k_dim, v_dim, r1, r2, r3, bl, stage, att_type): # r1 = r2
         super(AttLayer, self).__init__()
-
+        
         self.query_conv = nn.Conv1d(in_channels=q_dim, out_channels=q_dim // r1, kernel_size=1)
         self.key_conv = nn.Conv1d(in_channels=k_dim, out_channels=k_dim // r2, kernel_size=1)
         self.value_conv = nn.Conv1d(in_channels=v_dim, out_channels=v_dim // r3, kernel_size=1)
-
+        
         self.conv_out = nn.Conv1d(in_channels=v_dim // r3, out_channels=v_dim, kernel_size=1)
 
         self.bl = bl
         self.stage = stage
         self.att_type = att_type
         assert self.att_type in ['normal_att', 'block_att', 'sliding_att']
-        assert self.stage in ['encoder', 'decoder']
-
+        assert self.stage in ['encoder','decoder']
+        
         self.att_helper = AttentionHelper()
         self.window_mask = self.construct_window_mask()
-
+        
+    
     def construct_window_mask(self):
         '''
             construct window mask of shape (1, l, l + l//2 + l//2), used for sliding window self attention
         '''
-        window_mask = torch.zeros((1, self.bl, self.bl + 2 * (self.bl // 2)))
+        window_mask = torch.zeros((1, self.bl, self.bl + 2* (self.bl //2)))
         for i in range(self.bl):
-            window_mask[:, :, i:i + self.bl] = 1
+            window_mask[:, :, i:i+self.bl] = 1
         return window_mask.to(device)
-
+    
     def forward(self, x1, x2, mask):
         # x1 from the encoder
         # x2 from the decoder
-
+        
         query = self.query_conv(x1)
         key = self.key_conv(x1)
-
+         
         if self.stage == 'decoder':
             assert x2 is not None
             value = self.value_conv(x2)
         else:
             value = self.value_conv(x1)
-
+            
         if self.att_type == 'normal_att':
             return self._normal_self_att(query, key, value, mask)
         elif self.att_type == 'block_att':
@@ -90,21 +91,22 @@ class AttLayer(nn.Module):
         elif self.att_type == 'sliding_att':
             return self._sliding_window_self_att(query, key, value, mask)
 
-    def _normal_self_att(self, q, k, v, mask):
+    
+    def _normal_self_att(self,q,k,v, mask):
         m_batchsize, c1, L = q.size()
-        _, c2, L = k.size()
-        _, c3, L = v.size()
-        padding_mask = torch.ones((m_batchsize, 1, L)).to(device) * mask[:, 0:1, :]
+        _,c2,L = k.size()
+        _,c3,L = v.size()
+        padding_mask = torch.ones((m_batchsize, 1, L)).to(device) * mask[:,0:1,:]
         output, attentions = self.att_helper.scalar_dot_att(q, k, v, padding_mask)
         output = self.conv_out(F.relu(output))
         output = output[:, :, 0:L]
-        return output * mask[:, 0:1, :]
-
-    def _block_wise_self_att(self, q, k, v, mask):
+        return output * mask[:, 0:1, :]  
+        
+    def _block_wise_self_att(self, q,k,v, mask):
         m_batchsize, c1, L = q.size()
-        _, c2, L = k.size()
-        _, c3, L = v.size()
-
+        _,c2,L = k.size()
+        _,c3,L = v.size()
+        
         nb = L // self.bl
         if L % self.bl != 0:
             q = torch.cat([q, torch.zeros((m_batchsize, c1, self.bl - L % self.bl)).to(device)], dim=-1)
@@ -112,75 +114,59 @@ class AttLayer(nn.Module):
             v = torch.cat([v, torch.zeros((m_batchsize, c3, self.bl - L % self.bl)).to(device)], dim=-1)
             nb += 1
 
-        padding_mask = torch.cat([torch.ones((m_batchsize, 1, L)).to(device) * mask[:, 0:1, :],
-                                  torch.zeros((m_batchsize, 1, self.bl * nb - L)).to(device)], dim=-1)
+        padding_mask = torch.cat([torch.ones((m_batchsize, 1, L)).to(device) * mask[:,0:1,:], torch.zeros((m_batchsize, 1, self.bl * nb - L)).to(device)],dim=-1)
 
         q = q.reshape(m_batchsize, c1, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb, c1, self.bl)
-        padding_mask = padding_mask.reshape(m_batchsize, 1, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb,
-                                                                                                     1, self.bl)
+        padding_mask = padding_mask.reshape(m_batchsize, 1, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb,1, self.bl)
         k = k.reshape(m_batchsize, c2, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb, c2, self.bl)
         v = v.reshape(m_batchsize, c3, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb, c3, self.bl)
-
+        
         output, attentions = self.att_helper.scalar_dot_att(q, k, v, padding_mask)
         output = self.conv_out(F.relu(output))
-
+        
         output = output.reshape(m_batchsize, nb, c3, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize, c3, nb * self.bl)
         output = output[:, :, 0:L]
-        return output * mask[:, 0:1, :]
-
-    def _sliding_window_self_att(self, q, k, v, mask):
+        return output * mask[:, 0:1, :]  
+    
+    def _sliding_window_self_att(self, q,k,v, mask):
         m_batchsize, c1, L = q.size()
         _, c2, _ = k.size()
         _, c3, _ = v.size()
-
+        
+        
+        assert m_batchsize == 1  # currently, we only accept input with batch size 1
         # padding zeros for the last segment
-        nb = L // self.bl
+        nb = L // self.bl 
         if L % self.bl != 0:
             q = torch.cat([q, torch.zeros((m_batchsize, c1, self.bl - L % self.bl)).to(device)], dim=-1)
             k = torch.cat([k, torch.zeros((m_batchsize, c2, self.bl - L % self.bl)).to(device)], dim=-1)
             v = torch.cat([v, torch.zeros((m_batchsize, c3, self.bl - L % self.bl)).to(device)], dim=-1)
             nb += 1
-        if mask is not None:
-            padding_mask = torch.cat([torch.ones((m_batchsize, 1, L)).to(device) * mask[:, 0:1, :],
-                                      torch.zeros((m_batchsize, 1, self.bl * nb - L)).to(device)], dim=-1)
-        else:
-            padding_mask = torch.cat([torch.ones((m_batchsize, 1, L)).to(device),
-                                      torch.zeros((m_batchsize, 1, self.bl * nb - L)).to(device)], dim=-1)
-
-
+        padding_mask = torch.cat([torch.ones((m_batchsize, 1, L)).to(device) * mask[:,0:1,:], torch.zeros((m_batchsize, 1, self.bl * nb - L)).to(device)],dim=-1)
+        
         # sliding window approach, by splitting query_proj and key_proj into shape (c1, l) x (c1, 2l)
         # sliding window for query_proj: reshape
         q = q.reshape(m_batchsize, c1, nb, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize * nb, c1, self.bl)
-
+        
         # sliding window approach for key_proj
         # 1. add paddings at the start and end
-        k = torch.cat([torch.zeros(m_batchsize, c2, self.bl // 2).to(device), k,
-                       torch.zeros(m_batchsize, c2, self.bl // 2).to(device)], dim=-1)
-        v = torch.cat([torch.zeros(m_batchsize, c3, self.bl // 2).to(device), v,
-                       torch.zeros(m_batchsize, c3, self.bl // 2).to(device)], dim=-1)
-        padding_mask = torch.cat([torch.zeros(m_batchsize, 1, self.bl // 2).to(device), padding_mask,
-                                  torch.zeros(m_batchsize, 1, self.bl // 2).to(device)], dim=-1)
-
+        k = torch.cat([torch.zeros(m_batchsize, c2, self.bl // 2).to(device), k, torch.zeros(m_batchsize, c2, self.bl // 2).to(device)], dim=-1)
+        v = torch.cat([torch.zeros(m_batchsize, c3, self.bl // 2).to(device), v, torch.zeros(m_batchsize, c3, self.bl // 2).to(device)], dim=-1)
+        padding_mask = torch.cat([torch.zeros(m_batchsize, 1, self.bl // 2).to(device), padding_mask, torch.zeros(m_batchsize, 1, self.bl // 2).to(device)], dim=-1)
+        
         # 2. reshape key_proj of shape (m_batchsize*nb, c1, 2*self.bl)
-        k = torch.cat([k[:, :, i * self.bl:(i + 1) * self.bl + (self.bl // 2) * 2] for i in range(nb)],
-                      dim=0)  # special case when self.bl = 1
-        v = torch.cat([v[:, :, i * self.bl:(i + 1) * self.bl + (self.bl // 2) * 2] for i in range(nb)], dim=0)
+        k = torch.cat([k[:,:, i*self.bl:(i+1)*self.bl+(self.bl//2)*2] for i in range(nb)], dim=0) # special case when self.bl = 1
+        v = torch.cat([v[:,:, i*self.bl:(i+1)*self.bl+(self.bl//2)*2] for i in range(nb)], dim=0) 
         # 3. construct window mask of shape (1, l, 2l), and use it to generate final mask
-        padding_mask = torch.cat(
-            [padding_mask[:, :, i * self.bl:(i + 1) * self.bl + (self.bl // 2) * 2] for i in range(nb)],
-            dim=0)  # of shape (m*nb, 1, 2l)
-        final_mask = self.window_mask.repeat(m_batchsize * nb, 1, 1) * padding_mask
-
+        padding_mask = torch.cat([padding_mask[:,:, i*self.bl:(i+1)*self.bl+(self.bl//2)*2] for i in range(nb)], dim=0) # of shape (m*nb, 1, 2l)
+        final_mask = self.window_mask.repeat(m_batchsize * nb, 1, 1) * padding_mask 
+        
         output, attention = self.att_helper.scalar_dot_att(q, k, v, final_mask)
         output = self.conv_out(F.relu(output))
 
         output = output.reshape(m_batchsize, nb, -1, self.bl).permute(0, 2, 1, 3).reshape(m_batchsize, -1, nb * self.bl)
         output = output[:, :, 0:L]
-
-        if mask is not None:
-            return output * mask[:, 0:1, :]
-        else:
-            return output
+        return output * mask[:, 0:1, :]
 
 
 class MultiHeadAttLayer(nn.Module):
@@ -605,9 +591,21 @@ class Trainer:
         self.mse = nn.MSELoss(reduction='none')
         self.num_classes = num_classes
     
-    def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda"):
+def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda", class_weights=None):
         self.model.train()
         self.model.to(device)
+        
+        # --- WEIGHTED LOSS SETUP ---
+        if class_weights is not None:
+            # Convert to tensor if it isn't one already, and move to device
+            if not isinstance(class_weights, torch.Tensor):
+                class_weights = torch.FloatTensor(class_weights)
+            self.ce = nn.CrossEntropyLoss(weight=class_weights.to(device), ignore_index=-100)
+            print("Training with WEIGHTED CrossEntropyLoss.")
+        else:
+            self.ce = nn.CrossEntropyLoss(ignore_index=-100)
+            print("Training with UNWEIGHTED CrossEntropyLoss.")
+
         optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=1e-5)
         print('LR:{}'.format(learning_rate))
         
@@ -624,35 +622,57 @@ class Trainer:
             epoch_loss = 0
             correct = 0
             total = 0
+            step_count = 0
 
-            num_batches = len(batch_gen.list_of_examples) // batch_size
-            if len(batch_gen.list_of_examples) % batch_size != 0:
-                num_batches += 1
+            # 1. Zero gradients OUTSIDE the video loop for accumulation
+            optimizer.zero_grad() 
 
-            pbar = tqdm(total=num_batches, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch")
+            # The progress bar now tracks individual videos since physical batch size is 1
+            total_videos = len(batch_gen.list_of_examples)
+            pbar = tqdm(total=total_videos, desc=f"Epoch {epoch+1}/{num_epochs}", unit="video")
 
             while batch_gen.has_next():
-                batch_input, batch_target, mask, vids = batch_gen.next_batch(batch_size, False)
+                # 2. FORCE physical batch size to 1 to protect InstanceNorm
+                batch_input, batch_target, mask, vids = batch_gen.next_batch(1, False)
                 batch_input, batch_target, mask = batch_input.to(device), batch_target.to(device), mask.to(device)
-                optimizer.zero_grad()
+                
                 ps = self.model(batch_input, mask)
 
                 loss = 0
                 for p in ps:
+                    # Cross Entropy (Now respects class_weights if provided)
                     loss += self.ce(p.transpose(2, 1).contiguous().view(-1, self.num_classes), batch_target.view(-1))
-                    loss += 0.15 * torch.mean(torch.clamp(
-                        self.mse(F.log_softmax(p[:, :, 1:], dim=1), F.log_softmax(p.detach()[:, :, :-1], dim=1)), min=0,
-                        max=16) * mask[:, :, 1:])
+                    
+                    # 3. TMSE Loss - Replaced torch.mean with Masked Mean
+                    tmse = torch.clamp(self.mse(F.log_softmax(p[:, :, 1:], dim=1), F.log_softmax(p.detach()[:, :, :-1], dim=1)), min=0, max=16)
+                    masked_tmse = (tmse * mask[:, :, 1:]).sum() / (mask[:, :, 1:].sum() + 1e-5)
+                    loss += 0.15 * masked_tmse
 
-                epoch_loss += loss.item()
+                # 4. Scale the loss by the effective batch_size before backward pass
+                loss = loss / batch_size
                 loss.backward()
-                optimizer.step()
+                
+                step_count += 1
+                
+                # 5. Only step the optimizer after 'batch_size' videos have been accumulated
+                if step_count % batch_size == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                # Multiply by batch_size to recover the true loss scale for logging
+                epoch_loss += (loss.item() * batch_size)
 
                 _, predicted = torch.max(ps.data[-1], 1)
                 correct += ((predicted == batch_target).float() * mask[:, 0, :].squeeze(1)).sum().item()
                 total += torch.sum(mask[:, 0, :]).item()
+                
                 pbar.update(1)
-                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+                pbar.set_postfix({'loss': f"{(loss.item() * batch_size):.4f}"})
+
+            # 6. Catch any remaining accumulated gradients if dataset size isn't perfectly divisible by batch_size
+            if step_count % batch_size != 0:
+                optimizer.step()
+                optimizer.zero_grad()
 
             pbar.close()
             
@@ -664,7 +684,6 @@ class Trainer:
 
             # --- TESTING & CACHING ---
             if (epoch + 1) % 1 == 0 and batch_gen_tst is not None:
-                # Passed save_dir here so test() knows where to dump the predictions
                 metrics = self.test(batch_gen_tst, epoch, save_dir, device=device)
                 
                 with open(csv_path, mode='a', newline='') as f:
