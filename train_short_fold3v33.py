@@ -698,14 +698,14 @@ def main():
 
     print(f"Loaded Hyperparameters: {hparams}")
 
-    set_seed(441)
+    set_seed(431)
     g = torch.Generator()
-    g.manual_seed(441)
+    g.manual_seed(431)
     
     # PATH CONFIGURATIONS
     VIDEO_ROOT = "/project/lt200353-pcllm/3d_report_gen/real-colon/"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
-    FOLD = 4
+    FOLD = 3
     
     train_dataset = RealColonStreamingDataset(
         video_root=VIDEO_ROOT, 
@@ -801,7 +801,7 @@ def main():
     best_val_loss = float('inf')
     save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/mid_smoothing_dampw_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "re_32drop5expansion4stages2batch12lr03.pth")
+    best_model_path = os.path.join(save_dir, "re_32drop5expansion4stages2atch12lr03.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
