@@ -799,7 +799,7 @@ def main():
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/scratch/lt200353-pcllm/location/real_colon/checkpoints/full_shuffle/mid_smoothing_dampw_realcolon_fold{FOLD}"
+    save_dir = f"/project/pv927002/mid_smoothing_dampw_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "re_32drop5expansion4stages2batch12lr03.pth")
 
@@ -887,12 +887,13 @@ def main():
         else:
             # For SequentialLR (Cosine with Warmup), step without arguments
             scheduler.step()
-        
+
+        torch.save(full_model.state_dict(), (best_model_path+str(epoch)))
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
             print(f"\nNew best validation loss ({val_loss:.4f})! Saving model...")
-            torch.save(full_model.state_dict(), best_model_path)
+            torch.save(full_model.state_dict(), (best_model_path+str(epoch)))
         else:
             patience_counter += 1
             print(f"\nNo improvement. Early stopping patience: {patience_counter}/{patience}")

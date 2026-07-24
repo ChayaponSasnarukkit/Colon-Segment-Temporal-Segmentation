@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH -p gpu
+#SBATCH -p gpu-limited
 #SBATCH -N 1 -c 16
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH -t 8:00:00
-#SBATCH -A pv927002 
+#SBATCH -t 2:30:00
+#SBATCH -A lt200353
 #SBATCH -J TEST
 
 # 1. Clear previous environment clutter
@@ -17,5 +17,5 @@ conda activate myenv
 echo "Environment Activated: $CONDA_DEFAULT_ENV"
 
 # 5. Run the 
-srun python asformer_real.py #asformer_new.py
+srun python real_Asformer.py
 # srun python eval_asformer.py
