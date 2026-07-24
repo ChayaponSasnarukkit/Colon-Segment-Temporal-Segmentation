@@ -799,9 +799,9 @@ def main():
     patience = int(epochs//2)  
     patience_counter = 0
     best_val_loss = float('inf')
-    save_dir = f"/project/pv927002-dcpcce/mid_smoothing_dampw_realcolon_fold{FOLD}"
+    save_dir = f"/project/pv927002-dcpcce/4mid_smoothing_dampw_realcolon_fold{FOLD}"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "re3_32drop5expansion4stages2batch12lr03.pth")
+    best_model_path = os.path.join(save_dir, "re4_32drop5expansion4stages2batch12lr03.pth")
 
     # --- Setup Optimizer and Schedulers from Config ---
     optimizer = torch.optim.AdamW(full_model.parameters(), lr=cfg_lr, weight_decay=cfg_weight_decay)
@@ -893,7 +893,7 @@ def main():
             best_val_loss = val_loss
             patience_counter = 0
             print(f"\nNew best validation loss ({val_loss:.4f})! Saving model...")
-            torch.save(full_model.state_dict(), (best_model_path+str(epoch)))
+            #torch.save(full_model.state_dict(), (best_model_path+str(epoch)))
         else:
             patience_counter += 1
             print(f"\nNo improvement. Early stopping patience: {patience_counter}/{patience}")
