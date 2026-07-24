@@ -591,7 +591,7 @@ class Trainer:
         self.mse = nn.MSELoss(reduction='none')
         self.num_classes = num_classes
     
-def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda", class_weights=None):
+    def train(self, save_dir, batch_gen, num_epochs, batch_size, learning_rate, batch_gen_tst=None, device="cuda", class_weights=None):
         self.model.train()
         self.model.to(device)
         

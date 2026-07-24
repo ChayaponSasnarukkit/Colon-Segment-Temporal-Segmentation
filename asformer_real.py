@@ -458,7 +458,41 @@ random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
+import numpy as np
 
+def compute_weights_from_generator(batch_gen, num_classes):
+    print("Scanning training data to compute class weights...")
+    class_counts = np.zeros(num_classes)
+    
+    # Iterate through the entire training set once
+    while batch_gen.has_next():
+        _, batch_target, mask, _ = batch_gen.next_batch(1, False)
+        
+        # Extract only the valid frames using the mask
+        valid_mask = mask[:, 0, :] == 1
+        valid_targets = batch_target[valid_mask].cpu().numpy()
+        
+        # Tally the occurrences of each class
+        for t in valid_targets:
+            if 0 <= t < num_classes:
+                class_counts[int(t)] += 1
+                
+    # IMPORTANT: Reset the generator so it's ready for actual training
+    batch_gen.reset() 
+    
+    total_samples = np.sum(class_counts)
+    
+    # Standard inverse frequency: Total Samples / Class Count
+    # Added 1e-5 to prevent division by zero for completely missing classes
+    weights = total_samples / (class_counts + 1e-5)
+    
+    # Normalize the weights so their mean is 1.0. 
+    # This prevents the overall loss magnitude from shifting too much, 
+    # which would force you to retune your learning rate.
+    #weights = weights / np.mean(weights)
+    
+    print("Computed Class Weights:", np.round(weights, 4))
+    return weights.tolist()
 def main():
     # --- CONFIG ---
     action = 'train' 
@@ -466,7 +500,7 @@ def main():
     lr = 0.0005 
     
     SUBSAMPLING_FACTOR = 1
-    FOLD = 1
+    FOLD = 5
     print(f"Executing Fold: {FOLD}")
     
     # Updated Path configuration for real-colon
@@ -521,13 +555,15 @@ def main():
 
     if action == 'train':
         print(f"Starting ASFormer training...")
+        class_weights = compute_weights_from_generator(batch_gen_train, num_classes)
         trainer.train(
             save_dir=save_dir,
             batch_gen=batch_gen_train,
             num_epochs=num_epochs,
-            batch_size=6, 
+            batch_size=1, 
             learning_rate=lr,
-            batch_gen_tst=batch_gen_test
+            batch_gen_tst=batch_gen_test,
+            class_weights=class_weights
         )
         
         if batch_gen_test is not None:
