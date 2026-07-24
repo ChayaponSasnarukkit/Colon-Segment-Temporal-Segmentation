@@ -240,7 +240,7 @@ def set_seed(seed=42):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate MambaTemporalSegmentation")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained model checkpoint (.pth)")
-    parser.add_argument("--save_dir", type=str, default="./results", help="Directory to save evaluation results")
+    parser.add_argument("--save_dir", type=str, default="./", help="Directory to save evaluation results")
     VIDEO_ROOT = "/project/lt200353-pcllm/3d_report_gen/real-colon/"
     SPLIT_DIR = "/home/csasnaru/temporal_segmentation/data/dataset/RC_lists/5_fold/" 
     FOLD = 4
@@ -310,7 +310,7 @@ def main():
         class_name = IDX_TO_CLASS.get(idx, f"Class_{idx}")
         print(f"    - {class_name:<15}: {f1:.4f}")
         
-    csv_save_path = os.path.join(args.save_dir, f"evaluation_predictions_fold{args.fold}.csv")
+    csv_save_path = os.path.join(args.save_dir, f"real_evaluation_predictions_fold{FOLD}.csv")
     df_cache = pd.DataFrame(pred_cache)
     df_cache.to_csv(csv_save_path, index=False)
     print(f"\n✅ Successfully saved predictions with video IDs and frame indices to: {csv_save_path}")
