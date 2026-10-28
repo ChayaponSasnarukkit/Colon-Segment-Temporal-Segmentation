@@ -28,7 +28,6 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model.AttentionMemory import count_params
 from model.CMamba import MambaTemporalSegmentation
 from model.MambaMemory import MambaMemory
 
@@ -74,7 +73,7 @@ CONFIGS = {
         class_names=CAS_CLASS_NAMES,
         video_root="/project/lt200353-pcllm/3d_report_gen/cas_colon/features_dinov3/",
         # TODO(check): path pattern of your per-fold CSVs ({fold}, {phase} are filled in).
-        csv_template="./cv_folds_generated/fold{cfg_fold}_{phase}.csv",
+        csv_template="./cv_folds_generated/fold{fold}_{phase}.csv",
         pretrain_path="",             # TODO(check): CAS base-Mamba checkpoint ('' = random init)
         save_root="/project/pv927002-dcpcce/rebuttal_q3_plus_m/cas",
         source_fps=60,
@@ -102,6 +101,8 @@ EMA_DECAY = 0.995
 GRAD_CLIP_NORM: Optional[float] = None
 NUM_FUTURE_SECONDS = 12       # only needed by the datasets; unused by '+M'
 
+def count_params(module):
+    return sum(p.numel() for p in module.parameters())
 
 @dataclass
 class MambaTemporalConfig:
@@ -123,7 +124,7 @@ def parse_args():
     p.add_argument("--dataset", choices=["cas", "real"], required=True)
     p.add_argument("--compressor", choices=["mamba", "attention"], required=True)
     p.add_argument("--fold", type=int, required=True)
-    p.add_argument("--seed", type=int, default=441)
+    p.add_argument("--seed", type=int, default=42)
     # Attention baseline: copy these from your CMeRT config (MODEL.LSTR.*)
     p.add_argument("--attn-enc", default="16,1;10,2",
                    help="ENC_MODULE as 'queries,layers;...'; last stage queries must equal the token count")
@@ -152,7 +153,7 @@ def make_dataset(name, cfg, fold, phase, shuffle):
             fold=fold, phase=phase, **common,
         )
     # TODO(check): module path of your CAS-Colon dataset file
-    from dataset.cas_location import MedicalStreamingDataset
+    from dataset.cas_locationv3 import MedicalStreamingDataset
     return MedicalStreamingDataset(
         csv_path=cfg["csv_template"].format(fold=fold, phase=phase),
         video_root=cfg["video_root"], **common,
@@ -163,7 +164,7 @@ def cas_class_weights(dataset, num_classes):
     """MedicalStreamingDataset has no compute_weights(). This is inverse frequency
     over the sampled training labels, normalized to mean 1.
     TODO(check): replace with the weighting your CAS runs used."""
-    from dataset.cas_location import build_dense_label
+    from dataset.cas_locationv3 import build_dense_label
     counts = np.zeros(num_classes, dtype=np.float64)
     for _, row in dataset.df.iterrows():
         labels = build_dense_label(row, int(row["TotalFrames"]), dataset.fps)[:: dataset.step]
@@ -179,7 +180,7 @@ def class_weights_for(name, dataset, num_classes):
         return None
     if name == "real":
         return dataset.compute_weights()
-    return cas_class_weights(dataset, num_classes)
+    return None #cas_class_weights(dataset, num_classes)
 
 
 # -----------------------------------------------------------------------------
@@ -301,8 +302,11 @@ class ValResults:
 @torch.no_grad()
 def validate(model, loader, device, desc):
     model.eval()
+    total_loss = 0
+    steps=0
     C = model.num_classes
     cm = np.zeros((C, C), dtype=np.int64)
+    criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
     worker_states = {}  # raw and EMA never share streaming states
     for batch in tqdm(loader, desc=desc):
         vision, contexts, labels, reset_mask, w_id = prepare_batch(batch, device)
@@ -313,6 +317,8 @@ def validate(model, loader, device, desc):
         preds = out["logits"].argmax(-1).reshape(-1).cpu().numpy()
         targets = labels.reshape(-1).cpu().numpy()
         valid = targets != IGNORE_INDEX
+        steps += 1
+        total_loss += safe_ce_loss(out["logits"], labels, criterion)
         if valid.any():
             cm += np.bincount(targets[valid] * C + preds[valid], minlength=C * C).reshape(C, C)
 
@@ -322,7 +328,7 @@ def validate(model, loader, device, desc):
     f1 = np.divide(2 * precision * recall, precision + recall,
                    out=np.zeros(C), where=(precision + recall) != 0)
     acc = float(tp.sum() / cm.sum()) if cm.sum() else 0.0
-    return ValResults(acc=acc, macro_f1=float(f1.mean()), f1=f1)
+    return ValResults(acc=acc, macro_f1=float(f1.mean()), f1=f1), total_loss/steps
 
 
 # -----------------------------------------------------------------------------
@@ -413,20 +419,34 @@ def main():
     ema_model.eval()
 
     accum = cfg["virtual_batch_size"]
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
+    if args.dataset == "real":
+        EPOCHS = 100
+        PATIENCE = EPOCHS // 2
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
                                   lr=cfg["lr"], weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[
-            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=WARMUP_EPOCHS),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS - WARMUP_EPOCHS),
-        ],
-        milestones=[WARMUP_EPOCHS],
-    )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=WARMUP_EPOCHS),
+                torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS - WARMUP_EPOCHS),
+            ],
+            milestones=[WARMUP_EPOCHS],
+        )
+    else:
+        print("cas")
+        EPOCHS = 50
+        PATIENCE = EPOCHS // 2
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-4, weight_decay=1e-2)
+
+        # Reduce learning rate by half if validation loss stops improving for 2 epochs
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=2
+        )
 
     best_raw = (-1.0, None)   # (macro F1, epoch)
     best_ema = (-1.0, None)
     patience = 0
+    print(EPOCHS, PATIENCE)
     for epoch in range(1, EPOCHS + 1):
         print(f"\n######## Epoch {epoch}/{EPOCHS} ########")
         train_dataset.set_epoch(epoch - 1)
@@ -436,9 +456,9 @@ def main():
                                      ema_model, accum)
 
         val_generator.manual_seed(args.seed + 10000)
-        raw = validate(model, val_loader, device, "Validating RAW")
+        raw, val_loss = validate(model, val_loader, device, "Validating RAW")
         val_generator.manual_seed(args.seed + 10000)
-        ema = validate(ema_model.module, val_loader, device, "Validating EMA")
+        ema, _ = validate(ema_model.module, val_loader, device, "Validating EMA")
 
         print(f"Train loss {train_loss:.4f} | RAW F1 {raw.macro_f1:.4f} Acc {raw.acc:.4f} "
               f"| EMA F1 {ema.macro_f1:.4f} Acc {ema.acc:.4f}")
@@ -468,7 +488,10 @@ def main():
             patience += 1
             print(f"  EMA patience {patience}/{PATIENCE}")
 
-        scheduler.step()
+        if args.dataset == "cas":
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
         if patience >= PATIENCE:
             print("Early stopping (EMA macro F1)")
             break
